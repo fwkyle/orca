@@ -11,6 +11,7 @@ import {
 
 const require = createRequire(import.meta.url)
 const localSigning = require('./macos-local-signing.cjs')
+const signingPolicy = require('./macos-signing-policy.cjs')
 const LOCAL_IDENTITY = 'Orca Kyle Local Development Code Signing'
 const LOCAL_IDENTITY_HASH = FIXTURE_IDENTITY_HASH
 const KEYCHAIN_PATH = '/private/tmp/orca-kyle-local-signing.keychain-db'
@@ -201,12 +202,12 @@ describe.sequential('build-computer-macos signing selection', () => {
     const result = resolveFixture(fixture)
     expect(result.identityHash).toBe(SECOND_IDENTITY_HASH)
 
-    const mainArgs = electronBuilderConfig.__test.localComputerUseCodesignArgs(
+    const mainArgs = signingPolicy.localComputerUseCodesignArgs(
       result.identityHash,
       '/private/tmp/Orca Kyle Computer Use.app',
       fixture.keychainPath
     )
-    const helperArgs = electronBuilderConfig.__test.localNotificationStatusCodesignArgs(
+    const helperArgs = signingPolicy.localNotificationStatusCodesignArgs(
       result.identityHash,
       '/private/tmp/orca-notification-status',
       fixture.keychainPath
@@ -216,7 +217,7 @@ describe.sequential('build-computer-macos signing selection', () => {
       expect(args).not.toContain(LOCAL_IDENTITY)
     }
     expect(
-      electronBuilderConfig.__test.getMacSigningIdentity({
+      signingPolicy.getMacSigningIdentity({
         isMacRelease: false,
         isMacLocal: true,
         localMacSigning: result
@@ -270,7 +271,7 @@ describe.sequential('build-computer-macos signing selection', () => {
 
   it('keeps release main-app identity selection unmodified', () => {
     expect(
-      electronBuilderConfig.__test.getMacSigningIdentity({
+      signingPolicy.getMacSigningIdentity({
         isMacRelease: true,
         isMacLocal: false,
         localMacSigning: null

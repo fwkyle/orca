@@ -3,12 +3,16 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { withElectronBuilderConfigTestFixture } from './electron-builder-config-test-fixture.mjs'
+import {
+  installElectronBuilderConfigTestFixture,
+  withElectronBuilderConfigTestFixture
+} from './electron-builder-config-test-fixture.mjs'
 
 const require = createRequire(import.meta.url)
 const electronBuilderConfig = withElectronBuilderConfigTestFixture(({ requireConfig }) =>
   requireConfig()
 )
+const { validateConfiguration } = require('app-builder-lib/out/util/config/config')
 const { FileMatcher } = require('app-builder-lib/out/fileMatcher')
 const electronBuilderNativeRebuild = require('./electron-builder-native-rebuild.cjs')
 const {
@@ -32,6 +36,35 @@ const withHourlyEnv = (assert) => withEnv({ ORCA_MAC_HOURLY: '1' }, assert)
 const withAdhocEnv = (assert) => withEnv({ ORCA_MAC_ADHOC: '1' }, assert)
 
 describe('electron-builder config', () => {
+  it('imports without Keychain access and exposes no test-only configuration keys', () => {
+    let fixture
+    withElectronBuilderConfigTestFixture((activeFixture) => {
+      fixture = activeFixture
+      const config = activeFixture.requireConfig()
+      expect(activeFixture.securityCalls).toHaveLength(0)
+      expect(activeFixture.existsCalls).not.toContain(activeFixture.keychainPath)
+      expect(Reflect.ownKeys(config)).not.toContain('__test')
+    })
+    expect(fixture.isRestored()).toBe(true)
+  })
+
+  it('passes the real electron-builder 26.15.3 schema validation path', async () => {
+    const fixture = installElectronBuilderConfigTestFixture()
+    try {
+      const config = fixture.requireConfig()
+      expect(fixture.securityCalls).toHaveLength(0)
+      await expect(
+        validateConfiguration(config, {
+          isEnabled: false,
+          add: () => undefined
+        })
+      ).resolves.toBeUndefined()
+    } finally {
+      fixture.restore()
+    }
+    expect(fixture.isRestored()).toBe(true)
+  })
+
   it('restores the config fixture after a successful local identity read', () => {
     let fixture
     withElectronBuilderConfigTestFixture((activeFixture) => {

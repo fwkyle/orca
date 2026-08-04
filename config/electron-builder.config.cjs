@@ -16,11 +16,14 @@ const { writeMacBuildCompatibility } = require('./scripts/mac-build-compatibilit
 const { verifyPackagedPluginResources } = require('./scripts/verify-packaged-plugin-resources.cjs')
 const { verifySkillsCliRuntime } = require('./scripts/verify-skills-cli-runtime.cjs')
 const {
-  LOCAL_MAC_SIGNING_IDENTITY,
-  createLocalMacCodesignArgs,
   requireIdentityHash,
   resolveLocalMacSigningIdentity
 } = require('./scripts/macos-local-signing.cjs')
+const {
+  getMacSigningIdentity,
+  localComputerUseCodesignArgs,
+  localNotificationStatusCodesignArgs
+} = require('./scripts/macos-signing-policy.cjs')
 
 // Why: dev-channel builds must carry the *release* identity — same bundle id,
 // Developer ID signature, and notarization ticket — or Squirrel.Mac refuses to
@@ -512,15 +515,6 @@ module.exports = {
   }
 }
 
-Object.defineProperty(module.exports, '__test', {
-  enumerable: false,
-  value: {
-    getMacSigningIdentity,
-    localComputerUseCodesignArgs,
-    localNotificationStatusCodesignArgs
-  }
-})
-
 function chmodUnixCliLaunchers(resourcesDir, electronPlatformName) {
   if (electronPlatformName === 'win32') {
     return
@@ -656,24 +650,6 @@ function getLocalMacSigning() {
     localMacSigningResolved = true
   }
   return localMacSigning
-}
-
-function getMacSigningIdentity({ isMacRelease, isMacLocal, localMacSigning }) {
-  if (isMacRelease) {
-    return undefined
-  }
-  if (isMacLocal) {
-    return requireIdentityHash(localMacSigning?.identityHash)
-  }
-  return LOCAL_MAC_SIGNING_IDENTITY
-}
-
-function localComputerUseCodesignArgs(identityHash, targetPath, keychainPath) {
-  return createLocalMacCodesignArgs(identityHash, targetPath, keychainPath, { deep: true })
-}
-
-function localNotificationStatusCodesignArgs(identityHash, targetPath, keychainPath) {
-  return createLocalMacCodesignArgs(identityHash, targetPath, keychainPath)
 }
 
 function findInstalledMacSigningIdentity(keychainFile) {
