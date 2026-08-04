@@ -16,6 +16,8 @@ const LOCAL_MAC_SIGNING_KEYCHAIN_DIR = join(
 const LOCAL_MAC_SIGNING_KEYCHAIN_NAME = 'orca-kyle-local-signing.keychain-db'
 const LOCAL_MAC_SIGNING_PASSWORD_SERVICE = 'local-signing-keychain-password'
 const LOCAL_SIGNING_P12_PASSWORD_ENV = 'ORCA_LOCAL_SIGNING_P12_PASSWORD'
+// add-trusted-cert -d waits on the macOS administrator password prompt, so allow human time.
+const ADMIN_PROMPT_TIMEOUT_MS = 120000
 
 function getLocalMacSigningConfig(env = process.env, home = homedir()) {
   const configuredKeychain = env[LOCAL_MAC_SIGNING_KEYCHAIN_ENV]?.trim()
@@ -99,6 +101,9 @@ function ensureLocalMacSigningIdentity({
   if (keychainExists && password) {
     unlockKeychain(config, password, run)
   }
+  if (keychainExists) {
+    ensureKeychainSearchList(config.keychainPath, run)
+  }
 
   const inspection = keychainExists
     ? tryInspectSigningIdentities(config, run)
@@ -113,7 +118,10 @@ function ensureLocalMacSigningIdentity({
   if (keychainExists && !password) {
     throw missingPasswordError(config)
   }
-  if (inspection.untrusted.length > 0) {
+  if (inspection.untrusted.length === 1) {
+    return trustExistingSigningIdentity(config, password, inspection.untrusted[0].hash, run)
+  }
+  if (inspection.untrusted.length > 1) {
     throw identityInspectionError(config, inspection)
   }
   if (keychainExists && findCertificateCount(config, run) > 0) {
@@ -136,12 +144,72 @@ function ensureLocalMacSigningIdentity({
 
   ensureKeychainSearchList(config.keychainPath, run)
   createLocalCertificate(config, password, run)
-  allowCodeSignKeyAccess(config, password, run)
   const created = tryInspectSigningIdentities(config, run)
   if (created.usable.length !== 1) {
     throw identityInspectionError(config, created)
   }
   return { ...config, identityHash: created.usable[0] }
+}
+
+// Recovery path: trust exactly the certificate whose SHA-1 matches the existing identity.
+function trustExistingSigningIdentity(config, password, identityHash, run) {
+  const tempDirectory = mkdtempSync(join(tmpdir(), 'orca-kyle-local-signing-trust-'))
+  try {
+    const certificatePath = exportCertificateBySha1(config, identityHash, tempDirectory, run)
+    try {
+      run(
+        '/usr/bin/security',
+        [
+          'add-trusted-cert',
+          '-d',
+          '-r',
+          'trustRoot',
+          '-p',
+          'codeSign',
+          '-k',
+          config.keychainPath,
+          certificatePath
+        ],
+        { timeoutMs: ADMIN_PROMPT_TIMEOUT_MS }
+      )
+    } catch (trustError) {
+      throw new Error(
+        `macOS did not finish automatic trust registration for the existing local signing identity (SHA-1 ${identityHash}): ${trustError.message}. Re-run pnpm setup:mac-local-signing and approve the macOS administrator password prompt; see docs/upstream-sync-playbook.md.`
+      )
+    }
+  } finally {
+    rmSync(tempDirectory, { recursive: true, force: true })
+  }
+  allowCodeSignKeyAccess(config, password, run)
+  const recovered = tryInspectSigningIdentities(config, run)
+  if (recovered.usable.length !== 1) {
+    throw identityInspectionError(config, recovered)
+  }
+  return { ...config, identityHash: recovered.usable[0] }
+}
+
+// Never select a certificate by name only: multiple same-name certificates can exist.
+function exportCertificateBySha1(config, identityHash, tempDirectory, run) {
+  const pemOutput = run('/usr/bin/security', [
+    'find-certificate',
+    '-a',
+    '-c',
+    config.identity,
+    '-p',
+    config.keychainPath
+  ])
+  const pemBlocks =
+    pemOutput.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? []
+  for (const [index, pemBlock] of pemBlocks.entries()) {
+    const candidatePath = join(tempDirectory, `candidate-${index}.pem`)
+    writeFileSync(candidatePath, `${pemBlock}\n`, { encoding: 'utf8', mode: 0o600 })
+    if (certificateSha1Fingerprint(candidatePath, run) === identityHash) {
+      return candidatePath
+    }
+  }
+  throw new Error(
+    `No certificate matching the signing identity SHA-1 ${identityHash} was found in ${config.keychainPath}; refusing to trust a certificate selected by name only.`
+  )
 }
 
 function inspectSigningIdentities(config, run) {
@@ -249,11 +317,13 @@ function createLocalCertificate(config, password, run) {
       password,
       run
     )
+    // Transaction: the new identity becomes fully usable (trust + key ACL) or is removed.
     try {
       run(
         '/usr/bin/security',
         [
           'add-trusted-cert',
+          '-d',
           '-r',
           'trustRoot',
           '-p',
@@ -262,27 +332,44 @@ function createLocalCertificate(config, password, run) {
           config.keychainPath,
           certificatePath
         ],
-        { timeoutMs: 15000 }
+        { timeoutMs: ADMIN_PROMPT_TIMEOUT_MS }
       )
     } catch (trustError) {
-      throw trustRegistrationError(config, certificateHash, trustError, run)
+      throw rollbackImportedIdentityError(
+        config,
+        certificateHash,
+        'trust registration',
+        trustError,
+        run
+      )
+    }
+    try {
+      allowCodeSignKeyAccess(config, password, run)
+    } catch (partitionError) {
+      throw rollbackImportedIdentityError(
+        config,
+        certificateHash,
+        'key partition list registration',
+        partitionError,
+        run
+      )
     }
   } finally {
     rmSync(tempDirectory, { recursive: true, force: true })
   }
 }
 
-// Transaction boundary: a failed trust registration rolls back only the identity this run imported.
-function trustRegistrationError(config, certificateHash, trustError, run) {
+// Transaction boundary: a failed step rolls back only the identity this run imported.
+function rollbackImportedIdentityError(config, certificateHash, step, cause, run) {
   try {
     run('/usr/bin/security', ['delete-identity', '-t', '-Z', certificateHash, config.keychainPath])
   } catch (rollbackError) {
     return new Error(
-      `macOS did not finish trust registration for the fixed local signing identity, and rollback of the certificate this run imported (SHA-1 ${certificateHash}) also failed: ${rollbackError.message}. Remove exactly that identity manually; see docs/upstream-sync-playbook.md.`
+      `macOS local signing ${step} did not finish, and rollback of the certificate this run imported (SHA-1 ${certificateHash}) also failed: ${rollbackError.message}. Remove exactly that identity manually; see docs/upstream-sync-playbook.md.`
     )
   }
   return new Error(
-    `macOS did not finish trust registration for the fixed local signing identity (${trustError.message}); the certificate and key this run imported (SHA-1 ${certificateHash}) were rolled back. Re-run pnpm setup:mac-local-signing in a macOS GUI session and approve the trust prompt; see docs/upstream-sync-playbook.md for the manual procedure.`
+    `macOS local signing ${step} did not finish (${cause.message}); the certificate and key this run imported (SHA-1 ${certificateHash}) were rolled back. Re-run pnpm setup:mac-local-signing and approve the macOS administrator password prompt; see docs/upstream-sync-playbook.md.`
   )
 }
 
@@ -480,11 +567,11 @@ function untrustedIdentityError(config, untrusted) {
   const detail = untrusted.map((entry) => `SHA-1 ${entry.hash} (${entry.status})`).join(', ')
   if (untrusted.length === 1) {
     return new Error(
-      `Fixed local macOS signing identity "${config.identity}" in ${config.keychainPath} is not trusted for code signing (${detail}), so codesign cannot use it. Open Keychain Access, double-click the certificate with SHA-1 ${untrusted[0].hash} in the dedicated keychain, expand Trust, and set "When using this certificate" to "Always Trust"; then run pnpm setup:mac-local-signing again. See docs/upstream-sync-playbook.md for the manual procedure.`
+      `Fixed local macOS signing identity "${config.identity}" in ${config.keychainPath} is not trusted for code signing (${detail}), so codesign cannot use it. Run pnpm setup:mac-local-signing to trust exactly the certificate with SHA-1 ${untrusted[0].hash} (one macOS administrator password prompt); see docs/upstream-sync-playbook.md.`
     )
   }
   return new Error(
-    `Found ${untrusted.length} untrusted signing identities named "${config.identity}" in ${config.keychainPath} (${detail}); refusing automatic selection. Approve exactly one in Keychain Access or follow the manual recovery procedure in docs/upstream-sync-playbook.md.`
+    `Found ${untrusted.length} untrusted signing identities named "${config.identity}" in ${config.keychainPath} (${detail}); refusing automatic selection. Follow the manual recovery procedure in docs/upstream-sync-playbook.md.`
   )
 }
 

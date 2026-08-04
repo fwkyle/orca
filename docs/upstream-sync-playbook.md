@@ -110,14 +110,14 @@ macOS 기본 `/bin/bash`는 3.2.57로 Bash 4+ 전용 기능(associative array `d
 - 복구 완료 확인: `orca computer permissions --json` 결과에서 `accessibility=granted`와 `screenshots=granted`를 모두 확인해야 한다. 둘 중 하나라도 `not-granted`이면 토글 외관만으로 완료 처리하지 않는다.
 - 현재 구현: `pnpm build:mac`은 `Rottie Local` 방식의 전용 Keychain과 고정 identity `Orca Kyle Local Development Code Signing`을 사용한다. 인증서와 개인 키는 전용 Keychain에만 보관하고, 인증서 생성에 쓰는 임시 PEM/P12는 빌드가 끝나면 정리하며, Developer ID 릴리스 서명·공증 경로는 건드리지 않는다.
 - 최초 준비는 `pnpm setup:mac-local-signing`으로 한다. 이 명령은 고정 identity가 없을 때만 전용 인증서를 만들고, 이미 다른 인증서가 있어도 그 인증서를 자동 선택하지 않는다. 고정 identity 또는 전용 Keychain이 없거나 손상되면 명확히 실패한다.
-- R2(2026-08-04) 이후 verify/setup은 신뢰되지 않은 identity(`(CSSMERR_TP_NOT_TRUSTED)`처럼 괄호 상태가 붙은 항목)를 유효로 승인하지 않는다. codesign이 쓸 수 없는 상태이면 SHA-1 hash와 Keychain Access 승인 절차를 담은 오류로 명확히 실패한다. 또한 setup이 신뢰 등록에 실패하면 그 실행이 방금 import한 인증서·개인 키를 자동 롤백하므로, 실패를 반복해도 고아 인증서가 더 쌓이지 않는다. 기존 고아 항목은 자동 정리하지 않는다.
+- R2(2026-08-04)에서 verify/setup은 신뢰되지 않은 identity(`(CSSMERR_TP_NOT_TRUSTED)`처럼 괄호 상태가 붙은 항목)를 유효로 승인하지 않게 고쳐졌고, R3(2026-08-05)에서 setup은 신뢰되지 않은 identity를 자동 복구한다(Rottie `scripts/sign-local-macos.sh` 방식). 복구는 이름이 아니라 그 identity의 SHA-1과 정확히 일치하는 인증서만 임시 PEM으로 추출해 `security add-trusted-cert -d -r trustRoot -p codeSign -k`로 신뢰 등록하며, 전용 Keychain은 `security list-keychains -d user -s`로 기존 검색 목록을 보존하면서 멱등 등록하고, `security set-key-partition-list -S apple-tool:,apple:,codesign:`로 서명 암호 팝업을 제거한다. verify 단독 실행은 여전히 fail-closed지만 `pnpm build:mac`은 setup을 먼저 실행하므로 자동 복구 뒤 진행한다. 신뢰 등록 또는 partition 등록이 실패하면 그 실행이 방금 import한 인증서·개인 키만 자동 롤백하므로 실패가 여러 번 발생해도 고아 인증서가 더 쌓이지 않고, 기존 고아 항목은 자동 정리하지 않는다.
 - 손상 진단 (track-a-review-r1 실기기 실측): 전용 Keychain 안에 같은 이름 인증서 4개(SHA-1: A32F4023…, 280B3561…, A09FB6FA…, DE050927…)가 있고, 이 중 개인 키가 붙은 identity는 A32F4023… 1개뿐이며 `(CSSMERR_TP_NOT_TRUSTED)` 상태라 codesign이 거부한다. `security dump-trust-settings`에는 이 인증서의 신뢰 설정이 없고, 비밀번호 레코드(`local-signing-keychain-password-f067c35e262b1043`, 메타데이터만 확인)는 로그인 Keychain에 남아 있다.
-- 손상 상태 수동 복구는 에이전트가 자동 실행하지 않는다. 아래 절차는 kyle의 decision_gate 승인 후 kyle이 직접 실행한다.
+- 손상 상태 복구는 R3부터 자동이다. kyle의 수동 개입은 macOS 시스템(관리자) 암호 팝업 최대 1회뿐이며, Keychain Access에서 인증서를 찾아 직접 신뢰 설정을 바꿀 필요는 없다(R2의 GUI Always Trust 경로 폐기, R3 정정).
 
-  경로 A (기존 인증서 승인 — 가장 적은 변경):
-  1. Keychain Access에서 전용 Keychain(`~/Library/Application Support/com.chickenbreastky.orca-kyle/local-signing/orca-kyle-local-signing.keychain-db`)을 열고, SHA-1 `A32F4023…` 인증서를 더블클릭한다. 같은 이름 인증서가 여러 개이므로 hash로 구별한다.
-  2. Trust 항목을 펼쳐 "When using this certificate"를 "Always Trust"로 바꾼다. GUI 비밀번호 입력이 필요한 자동화 불가 지점이다.
-  3. `pnpm setup:mac-local-signing`을 다시 실행해 identity hash가 출력되며 성공하는지 확인한다.
+  경로 A (자동 신뢰 등록 — 표준):
+  1. `pnpm setup:mac-local-signing`을 실행한다. setup이 기존 identity(SHA-1 `A32F4023…`)와 정확히 일치하는 인증서만 골라 신뢰 등록을 시도한다.
+  2. macOS 시스템 암호 팝업이 뜨면 관리자 암호를 입력해 1회 승인한다.
+  3. identity hash(`A32F4023…`)가 출력되며 성공하는지 확인한다.
   4. (별도 승인 시) 개인 키가 없는 고아 인증서 3개만 정리한다: `security delete-certificate -Z <SHA-1> "<전용 Keychain 경로>"`를 280B3561…, A09FB6FA…, DE050927… 각각에 실행한다.
 
   경로 B (전용 Keychain만 완전 초기화):

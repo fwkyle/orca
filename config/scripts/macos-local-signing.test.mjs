@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -10,6 +10,11 @@ const require = createRequire(import.meta.url)
 const GENERATED_CERT_HASH = '5EE6B7B408C8E4D21F169376A37543BB2B9F0001'
 const UNTRUSTED_CERT_HASH = 'A32F4023600BFDC1E7684C97048FEA9ED87A0A79'
 const SECOND_USABLE_HASH = '0123456789ABCDEF0123456789ABCDEF01234567'
+const ORPHAN_CERT_HASHES = [
+  '280B3561727FC9A13A34EE242CE46D9E566A340E',
+  'A09FB6FA48236D6177D641EAD358E4C9480244C0',
+  'DE0509277BEC9AB515D2BB3CC9004CBFC6A6BC77'
+]
 const FIXTURE_PASSWORD = 'fixtureStoredKeychainPassword123'
 const P12_PASSWORD_ENV = 'ORCA_LOCAL_SIGNING_P12_PASSWORD'
 
@@ -122,6 +127,11 @@ describe('macOS local signing fail-closed regression (R2)', () => {
     return [...input.trim().matchAll(/"([^"]*)"/g)].map((match) => match[1])
   }
 
+  // Fixture certs carry their SHA-1 in the PEM body so the fake x509 can fingerprint them.
+  function hashFromFixtureCertContent(content) {
+    return content.match(/[0-9A-F]{40}/)?.[0] ?? GENERATED_CERT_HASH
+  }
+
   function renderFindIdentity(state) {
     const lines = state.identities.map(
       (identity, index) =>
@@ -152,8 +162,17 @@ describe('macOS local signing fail-closed regression (R2)', () => {
         return ''
       case 'unlock-keychain':
       case 'set-keychain-settings':
-      case 'set-key-partition-list':
         return ''
+      case 'set-key-partition-list': {
+        if (state.partitionFails) {
+          throw fixtureCommandError(
+            'security set-key-partition-list',
+            1,
+            'The user name or passphrase you entered is not correct.'
+          )
+        }
+        return ''
+      }
       case 'create-keychain':
         return ''
       case 'list-keychains': {
@@ -164,14 +183,19 @@ describe('macOS local signing fail-closed regression (R2)', () => {
       }
       case 'find-identity':
         return renderFindIdentity(state)
-      case 'find-certificate':
-        return Array.from(
-          { length: state.certificateCount },
-          () => 'keychain: "/Users/fixture/Library/Keychains/dedicated.keychain-db"'
-        ).join('\n')
+      case 'find-certificate': {
+        if (rest.includes('-p')) {
+          return state.certificates
+            .map((hash) => `-----BEGIN CERTIFICATE-----\n${hash}\n-----END CERTIFICATE-----`)
+            .join('\n')
+        }
+        return state.certificates
+          .map(() => 'keychain: "/Users/fixture/Library/Keychains/dedicated.keychain-db"')
+          .join('\n')
+      }
       case 'import':
+        state.certificates.push(GENERATED_CERT_HASH)
         state.identities.push({ hash: GENERATED_CERT_HASH, status: 'CSSMERR_TP_NOT_TRUSTED' })
-        state.certificateCount += 1
         return ''
       case 'add-trusted-cert': {
         if (state.trustFails) {
@@ -181,8 +205,11 @@ describe('macOS local signing fail-closed regression (R2)', () => {
             'User interaction is not allowed'
           )
         }
+        const content = readFileSync(rest.at(-1), 'utf8')
+        state.trustedCertContents.push(content)
+        const trustedHash = hashFromFixtureCertContent(content)
         for (const identity of state.identities) {
-          if (identity.hash === GENERATED_CERT_HASH) {
+          if (identity.hash === trustedHash) {
             identity.status = null
           }
         }
@@ -192,7 +219,7 @@ describe('macOS local signing fail-closed regression (R2)', () => {
         const hash = rest[rest.indexOf('-Z') + 1]
         state.deletedIdentityHashes.push(hash)
         state.identities = state.identities.filter((identity) => identity.hash !== hash)
-        state.certificateCount = Math.max(0, state.certificateCount - 1)
+        state.certificates = state.certificates.filter((certificate) => certificate !== hash)
         return ''
       }
       default:
@@ -211,8 +238,10 @@ describe('macOS local signing fail-closed regression (R2)', () => {
         state.keyModeAtPkcs12 = statSync(rest[rest.indexOf('-inkey') + 1]).mode & 0o777
         writeFileSync(rest[rest.indexOf('-out') + 1], 'fixture-p12')
         return ''
-      case 'x509':
-        return `SHA1 Fingerprint=${GENERATED_CERT_HASH.match(/../g).join(':')}\n`
+      case 'x509': {
+        const content = readFileSync(rest[rest.indexOf('-in') + 1], 'utf8')
+        return `SHA1 Fingerprint=${hashFromFixtureCertContent(content).match(/../g).join(':')}\n`
+      }
       default:
         throw new Error(`Unexpected openssl subcommand: ${subcommand}`)
     }
@@ -222,10 +251,12 @@ describe('macOS local signing fail-closed regression (R2)', () => {
     const state = {
       storedPassword: FIXTURE_PASSWORD,
       identities: [],
-      certificateCount: 0,
+      certificates: [],
       searchList: [],
       trustFails: false,
+      partitionFails: false,
       deletedIdentityHashes: [],
+      trustedCertContents: [],
       keyModeAtPkcs12: null,
       calls: [],
       ...overrides
@@ -265,6 +296,33 @@ describe('macOS local signing fail-closed regression (R2)', () => {
     )
   }
 
+  function ensureWithFixture(run, keychainPath, home) {
+    return signing.ensureLocalMacSigningIdentity({
+      env: fixtureEnv(keychainPath),
+      home,
+      platform: 'darwin',
+      run
+    })
+  }
+
+  function verifyWithFixture(run, keychainPath, home) {
+    return signing.verifyLocalMacSigningIdentity({
+      env: fixtureEnv(keychainPath),
+      home,
+      platform: 'darwin',
+      run
+    })
+  }
+
+  function searchListWriteCalls(state) {
+    return state.calls.filter(
+      (call) =>
+        call.command === '/usr/bin/security' &&
+        call.args[0] === 'list-keychains' &&
+        call.args.includes('-s')
+    )
+  }
+
   it('treats identities with a parenthesized status as unusable for codesign', () => {
     const output = [
       `  1) ${UNTRUSTED_CERT_HASH} "Orca Kyle Local Development Code Signing" (CSSMERR_TP_NOT_TRUSTED)`,
@@ -278,25 +336,18 @@ describe('macOS local signing fail-closed regression (R2)', () => {
     ])
   })
 
-  it('verify fails closed with hash and Keychain Access guidance when the identity is untrusted', () => {
+  it('verify fails closed with hash and setup guidance when the identity is untrusted', () => {
     const { home, keychainPath } = createScratchSigningPaths()
     createExistingKeychainFile(keychainPath)
     const { run } = createSigningFixture({
       identities: [{ hash: UNTRUSTED_CERT_HASH, status: 'CSSMERR_TP_NOT_TRUSTED' }]
     })
-    const error = captureError(() =>
-      signing.verifyLocalMacSigningIdentity({
-        env: fixtureEnv(keychainPath),
-        home,
-        platform: 'darwin',
-        run
-      })
-    )
+    const error = captureError(() => verifyWithFixture(run, keychainPath, home))
     expect(error?.message).toContain('not trusted for code signing')
     expect(error?.message).toContain(UNTRUSTED_CERT_HASH)
     expect(error?.message).toContain('CSSMERR_TP_NOT_TRUSTED')
-    expect(error?.message).toContain('Keychain Access')
     expect(error?.message).toContain('pnpm setup:mac-local-signing')
+    expect(error?.message).toContain('administrator password prompt')
   })
 
   it('verify succeeds when exactly one usable identity exists alongside an untrusted one', () => {
@@ -308,62 +359,94 @@ describe('macOS local signing fail-closed regression (R2)', () => {
         { hash: UNTRUSTED_CERT_HASH, status: 'CSSMERR_TP_NOT_TRUSTED' }
       ]
     })
-    const result = signing.verifyLocalMacSigningIdentity({
-      env: fixtureEnv(keychainPath),
-      home,
-      platform: 'darwin',
-      run
-    })
+    const result = verifyWithFixture(run, keychainPath, home)
     expect(result.identityHash).toBe(SECOND_USABLE_HASH)
   })
 
   it('verify fails clearly when the keychain file is missing', () => {
     const { home, keychainPath } = createScratchSigningPaths()
     const { run } = createSigningFixture()
-    const error = captureError(() =>
-      signing.verifyLocalMacSigningIdentity({
-        env: fixtureEnv(keychainPath),
-        home,
-        platform: 'darwin',
-        run
-      })
-    )
+    const error = captureError(() => verifyWithFixture(run, keychainPath, home))
     expect(error?.message).toContain('was not found')
   })
 
-  it('setup fails closed on the live untrusted-identity state instead of printing success', () => {
+  it('setup recovers an existing untrusted identity by trusting exactly its hash-matching certificate', () => {
     const { home, keychainPath } = createScratchSigningPaths()
     createExistingKeychainFile(keychainPath)
     const { state, run } = createSigningFixture({
       identities: [{ hash: UNTRUSTED_CERT_HASH, status: 'CSSMERR_TP_NOT_TRUSTED' }],
-      certificateCount: 3
+      // Orphan certs come first so the loop must skip them to reach the identity cert.
+      certificates: [...ORPHAN_CERT_HASHES, UNTRUSTED_CERT_HASH]
     })
-    const error = captureError(() =>
-      signing.ensureLocalMacSigningIdentity({
-        env: fixtureEnv(keychainPath),
-        home,
-        platform: 'darwin',
-        run
-      })
-    )
-    expect(error?.message).toContain('not trusted for code signing')
-    expect(error?.message).toContain(UNTRUSTED_CERT_HASH)
-    expect(error?.message).toContain('Keychain Access')
+    const result = ensureWithFixture(run, keychainPath, home)
+    expect(result.identityHash).toBe(UNTRUSTED_CERT_HASH)
+    const trustCall = findSecurityCall(state, 'add-trusted-cert')
+    expect(trustCall?.args.slice(0, -1)).toEqual([
+      'add-trusted-cert',
+      '-d',
+      '-r',
+      'trustRoot',
+      '-p',
+      'codeSign',
+      '-k',
+      keychainPath
+    ])
+    expect(state.trustedCertContents).toHaveLength(1)
+    expect(state.trustedCertContents[0]).toContain(UNTRUSTED_CERT_HASH)
+    for (const orphanHash of ORPHAN_CERT_HASHES) {
+      expect(state.trustedCertContents[0]).not.toContain(orphanHash)
+    }
     const subcommands = calledSecuritySubcommands(state)
-    expect(subcommands).not.toContain('create-keychain')
     expect(subcommands).not.toContain('import')
+    expect(subcommands).not.toContain('create-keychain')
     expect(subcommands).not.toContain('delete-identity')
+    expect(subcommands).not.toContain('delete-certificate')
+    expect(state.certificates).toHaveLength(4)
+    expect(findSecurityCall(state, 'set-key-partition-list')?.options.input).toContain(
+      'apple-tool:,apple:,codesign:'
+    )
+  })
+
+  it('setup fails closed without deleting anything when automatic trust of an existing identity fails', () => {
+    const { home, keychainPath } = createScratchSigningPaths()
+    createExistingKeychainFile(keychainPath)
+    const { state, run } = createSigningFixture({
+      identities: [{ hash: UNTRUSTED_CERT_HASH, status: 'CSSMERR_TP_NOT_TRUSTED' }],
+      certificates: [...ORPHAN_CERT_HASHES, UNTRUSTED_CERT_HASH],
+      trustFails: true
+    })
+    const error = captureError(() => ensureWithFixture(run, keychainPath, home))
+    expect(error?.message).toContain('did not finish automatic trust registration')
+    expect(error?.message).toContain(UNTRUSTED_CERT_HASH)
+    expect(error?.message).toContain('administrator password prompt')
+    const subcommands = calledSecuritySubcommands(state)
+    expect(subcommands).not.toContain('delete-identity')
+    expect(subcommands).not.toContain('delete-certificate')
+    expect(subcommands).not.toContain('import')
+    expect(state.certificates).toHaveLength(4)
+    expect(state.identities[0]?.status).toBe('CSSMERR_TP_NOT_TRUSTED')
+  })
+
+  it('setup refuses to select among multiple untrusted identities', () => {
+    const { home, keychainPath } = createScratchSigningPaths()
+    createExistingKeychainFile(keychainPath)
+    const { state, run } = createSigningFixture({
+      identities: [
+        { hash: UNTRUSTED_CERT_HASH, status: 'CSSMERR_TP_NOT_TRUSTED' },
+        { hash: GENERATED_CERT_HASH, status: 'CSSMERR_TP_NOT_TRUSTED' }
+      ],
+      certificates: [UNTRUSTED_CERT_HASH, GENERATED_CERT_HASH]
+    })
+    const error = captureError(() => ensureWithFixture(run, keychainPath, home))
+    expect(error?.message).toContain('Found 2 untrusted signing identities')
+    expect(error?.message).toContain('refusing automatic selection')
+    expect(calledSecuritySubcommands(state)).not.toContain('add-trusted-cert')
   })
 
   it('setup recreates the keychain from the stored password record when the file is missing', () => {
     const { home, keychainPath } = createScratchSigningPaths()
     const { state, run } = createSigningFixture()
-    const result = signing.ensureLocalMacSigningIdentity({
-      env: fixtureEnv(keychainPath),
-      home,
-      platform: 'darwin',
-      run
-    })
+    const result = ensureWithFixture(run, keychainPath, home)
     expect(result.identityHash).toBe(GENERATED_CERT_HASH)
     const subcommands = calledSecuritySubcommands(state)
     expect(subcommands).toContain('create-keychain')
@@ -378,17 +461,52 @@ describe('macOS local signing fail-closed regression (R2)', () => {
     expect(pkcs12Call?.options.env?.[P12_PASSWORD_ENV]).toBe(FIXTURE_PASSWORD)
     // m3: the temporary private key is locked down before the p12 export reads it.
     expect(state.keyModeAtPkcs12).toBe(0o600)
+    expect(subcommands).toContain('set-key-partition-list')
+  })
+
+  it('setup registers the dedicated keychain in the search list preserving existing entries', () => {
+    const { home, keychainPath } = createScratchSigningPaths()
+    createExistingKeychainFile(keychainPath)
+    const existingKeychain = '/Users/fixture/Library/Keychains/login.keychain-db'
+    const { state, run } = createSigningFixture({
+      identities: [{ hash: SECOND_USABLE_HASH, status: null }],
+      certificates: [SECOND_USABLE_HASH],
+      searchList: [existingKeychain]
+    })
+    const result = ensureWithFixture(run, keychainPath, home)
+    expect(result.identityHash).toBe(SECOND_USABLE_HASH)
+    const writeCalls = searchListWriteCalls(state)
+    expect(writeCalls).toHaveLength(1)
+    expect(writeCalls[0]?.args).toEqual([
+      'list-keychains',
+      '-d',
+      'user',
+      '-s',
+      keychainPath,
+      existingKeychain
+    ])
+  })
+
+  it('setup leaves the search list untouched when the keychain is already registered', () => {
+    const { home, keychainPath } = createScratchSigningPaths()
+    createExistingKeychainFile(keychainPath)
+    const existingKeychain = '/Users/fixture/Library/Keychains/login.keychain-db'
+    const { state, run } = createSigningFixture({
+      identities: [{ hash: SECOND_USABLE_HASH, status: null }],
+      certificates: [SECOND_USABLE_HASH],
+      searchList: [keychainPath, existingKeychain]
+    })
+    const result = ensureWithFixture(run, keychainPath, home)
+    expect(result.identityHash).toBe(SECOND_USABLE_HASH)
+    const writeCalls = searchListWriteCalls(state)
+    expect(writeCalls).toHaveLength(0)
+    expect(state.searchList).toEqual([keychainPath, existingKeychain])
   })
 
   it('setup generates and stores a new keychain password on a fresh keychain', () => {
     const { home, keychainPath } = createScratchSigningPaths()
     const { state, run } = createSigningFixture({ storedPassword: null })
-    const result = signing.ensureLocalMacSigningIdentity({
-      env: fixtureEnv(keychainPath),
-      home,
-      platform: 'darwin',
-      run
-    })
+    const result = ensureWithFixture(run, keychainPath, home)
     expect(result.identityHash).toBe(GENERATED_CERT_HASH)
     const subcommands = calledSecuritySubcommands(state)
     expect(subcommands).toContain('create-keychain')
@@ -408,35 +526,35 @@ describe('macOS local signing fail-closed regression (R2)', () => {
     const { home, keychainPath } = createScratchSigningPaths()
     createExistingKeychainFile(keychainPath)
     const { state, run } = createSigningFixture({ trustFails: true })
-    const error = captureError(() =>
-      signing.ensureLocalMacSigningIdentity({
-        env: fixtureEnv(keychainPath),
-        home,
-        platform: 'darwin',
-        run
-      })
-    )
+    const error = captureError(() => ensureWithFixture(run, keychainPath, home))
     expect(error?.message).toContain('rolled back')
     expect(error?.message).toContain(GENERATED_CERT_HASH)
     expect(error?.message).toContain('docs/upstream-sync-playbook.md')
     expect(calledSecuritySubcommands(state)).toContain('import')
+    expect(findSecurityCall(state, 'add-trusted-cert')?.args).toContain('-d')
     expect(state.deletedIdentityHashes).toEqual([GENERATED_CERT_HASH])
     expect(state.identities).toEqual([])
-    expect(state.certificateCount).toBe(0)
+    expect(state.certificates).toEqual([])
+  })
+
+  it('setup rolls back the just-imported identity when key partition list registration fails', () => {
+    const { home, keychainPath } = createScratchSigningPaths()
+    createExistingKeychainFile(keychainPath)
+    const { state, run } = createSigningFixture({ partitionFails: true })
+    const error = captureError(() => ensureWithFixture(run, keychainPath, home))
+    expect(error?.message).toContain('key partition list registration')
+    expect(error?.message).toContain('rolled back')
+    expect(error?.message).toContain(GENERATED_CERT_HASH)
+    expect(state.deletedIdentityHashes).toEqual([GENERATED_CERT_HASH])
+    expect(state.identities).toEqual([])
+    expect(state.certificates).toEqual([])
   })
 
   it('setup refuses automatic cleanup when only orphan certificates remain', () => {
     const { home, keychainPath } = createScratchSigningPaths()
     createExistingKeychainFile(keychainPath)
-    const { state, run } = createSigningFixture({ certificateCount: 3 })
-    const error = captureError(() =>
-      signing.ensureLocalMacSigningIdentity({
-        env: fixtureEnv(keychainPath),
-        home,
-        platform: 'darwin',
-        run
-      })
-    )
+    const { state, run } = createSigningFixture({ certificates: [...ORPHAN_CERT_HASHES] })
+    const error = captureError(() => ensureWithFixture(run, keychainPath, home))
     expect(error?.message).toContain('no usable signing identity')
     expect(error?.message).toContain('Refusing automatic cleanup')
     expect(error?.message).toContain('docs/upstream-sync-playbook.md')
@@ -456,14 +574,7 @@ describe('macOS local signing fail-closed regression (R2)', () => {
         { hash: GENERATED_CERT_HASH, status: null }
       ]
     })
-    const error = captureError(() =>
-      signing.ensureLocalMacSigningIdentity({
-        env: fixtureEnv(keychainPath),
-        home,
-        platform: 'darwin',
-        run
-      })
-    )
+    const error = captureError(() => ensureWithFixture(run, keychainPath, home))
     expect(error?.message).toContain('Expected one fixed local macOS signing identity')
     expect(error?.message).toContain('found 2 usable')
     expect(error?.message).toContain('docs/upstream-sync-playbook.md')
