@@ -1,6 +1,7 @@
 import { spawnSync } from 'node:child_process'
 import { chmodSync, copyFileSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
+import localSigningApi from './macos-local-signing.cjs'
 
 const repoRoot = path.resolve(import.meta.dirname, '../..')
 const packagePath = path.join(repoRoot, 'native', 'computer-use-macos')
@@ -17,12 +18,17 @@ const entitlementsPath = path.join(
 const bundleId =
   process.env.ORCA_COMPUTER_MACOS_BUNDLE_ID ?? 'com.chickenbreastky.orca-kyle.computer-use'
 const displayName = 'Orca Kyle Computer Use'
-const signingIdentity = resolveSigningIdentity()
 const universalTriples = ['arm64-apple-macosx', 'x86_64-apple-macosx']
 
 if (process.platform !== 'darwin') {
   process.exit(0)
 }
+
+const localSigning =
+  process.env.ORCA_LOCAL_MAC_SIGNING === '1' && process.env.ORCA_MAC_RELEASE !== '1'
+    ? localSigningApi.verifyLocalMacSigningIdentity()
+    : null
+const signingIdentity = resolveSigningIdentity()
 
 buildUniversalBinary()
 chmodSync(binaryPath, 0o755)
@@ -55,7 +61,11 @@ function createHelperApp() {
 }
 
 function codesignArgs(identity, targetPath) {
-  const args = ['--force', '--deep', '--sign', identity]
+  const args = ['--force', '--deep']
+  if (localSigning) {
+    args.push('--timestamp=none', '--keychain', localSigning.keychainPath)
+  }
+  args.push('--sign', identity)
   if (process.env.ORCA_MAC_RELEASE === '1' && identity !== '-') {
     args.push('--options', 'runtime', '--timestamp', '--entitlements', entitlementsPath)
   }
@@ -64,6 +74,9 @@ function codesignArgs(identity, targetPath) {
 }
 
 function resolveSigningIdentity() {
+  if (localSigning) {
+    return localSigning.identity
+  }
   const explicitIdentity = process.env.ORCA_COMPUTER_MACOS_SIGN_IDENTITY ?? process.env.CSC_NAME
   if (explicitIdentity) {
     return explicitIdentity

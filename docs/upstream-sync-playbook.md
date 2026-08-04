@@ -108,9 +108,34 @@ macOS 기본 `/bin/bash`는 3.2.57로 Bash 4+ 전용 기능(associative array `d
   ```
 
 - 복구 완료 확인: `orca computer permissions --json` 결과에서 `accessibility=granted`와 `screenshots=granted`를 모두 확인해야 한다. 둘 중 하나라도 `not-granted`이면 토글 외관만으로 완료 처리하지 않는다.
-- 후속 개선: 고정 로컬 개발용 서명 인증서를 `Rottie Local` 방식으로 도입한다. 인증서와 개인 키는 Keychain에만 두고 저장소에 넣지 않으며, Developer ID 릴리스 서명·공증 경로와 분리한다.
-- 고정 로컬 개발용 서명 인증서를 도입하기 전에는 ad-hoc 신원이 빌드마다 바뀔 수 있어, 이 TCC reset 및 새 helper 권한 재승인 절차가 매 빌드 반복될 수 있다.
+- 현재 구현: `pnpm build:mac`은 `Rottie Local` 방식의 전용 Keychain과 고정 identity `Orca Kyle Local Development Code Signing`을 사용한다. 인증서와 개인 키는 전용 Keychain에만 보관하고, 인증서 생성에 쓰는 임시 PEM/P12는 빌드가 끝나면 정리하며, Developer ID 릴리스 서명·공증 경로는 건드리지 않는다.
+- 최초 준비는 `pnpm setup:mac-local-signing`으로 한다. 이 명령은 고정 identity가 없을 때만 전용 인증서를 만들고, 이미 다른 인증서가 있어도 그 인증서를 자동 선택하지 않는다. 고정 identity 또는 전용 Keychain이 없거나 손상되면 명확히 실패한다.
+- R2(2026-08-04) 이후 verify/setup은 신뢰되지 않은 identity(`(CSSMERR_TP_NOT_TRUSTED)`처럼 괄호 상태가 붙은 항목)를 유효로 승인하지 않는다. codesign이 쓸 수 없는 상태이면 SHA-1 hash와 Keychain Access 승인 절차를 담은 오류로 명확히 실패한다. 또한 setup이 신뢰 등록에 실패하면 그 실행이 방금 import한 인증서·개인 키를 자동 롤백하므로, 실패를 반복해도 고아 인증서가 더 쌓이지 않는다. 기존 고아 항목은 자동 정리하지 않는다.
+- 손상 진단 (track-a-review-r1 실기기 실측): 전용 Keychain 안에 같은 이름 인증서 4개(SHA-1: A32F4023…, 280B3561…, A09FB6FA…, DE050927…)가 있고, 이 중 개인 키가 붙은 identity는 A32F4023… 1개뿐이며 `(CSSMERR_TP_NOT_TRUSTED)` 상태라 codesign이 거부한다. `security dump-trust-settings`에는 이 인증서의 신뢰 설정이 없고, 비밀번호 레코드(`local-signing-keychain-password-f067c35e262b1043`, 메타데이터만 확인)는 로그인 Keychain에 남아 있다.
+- 손상 상태 수동 복구는 에이전트가 자동 실행하지 않는다. 아래 절차는 kyle의 decision_gate 승인 후 kyle이 직접 실행한다.
+
+  경로 A (기존 인증서 승인 — 가장 적은 변경):
+  1. Keychain Access에서 전용 Keychain(`~/Library/Application Support/com.chickenbreastky.orca-kyle/local-signing/orca-kyle-local-signing.keychain-db`)을 열고, SHA-1 `A32F4023…` 인증서를 더블클릭한다. 같은 이름 인증서가 여러 개이므로 hash로 구별한다.
+  2. Trust 항목을 펼쳐 "When using this certificate"를 "Always Trust"로 바꾼다. GUI 비밀번호 입력이 필요한 자동화 불가 지점이다.
+  3. `pnpm setup:mac-local-signing`을 다시 실행해 identity hash가 출력되며 성공하는지 확인한다.
+  4. (별도 승인 시) 개인 키가 없는 고아 인증서 3개만 정리한다: `security delete-certificate -Z <SHA-1> "<전용 Keychain 경로>"`를 280B3561…, A09FB6FA…, DE050927… 각각에 실행한다.
+
+  경로 B (전용 Keychain만 완전 초기화):
+  1. `security delete-keychain "<전용 Keychain 경로>"`
+  2. 로그인 Keychain의 비밀번호 레코드만 삭제: `security delete-generic-password -s "local-signing-keychain-password-f067c35e262b1043" ~/Library/Keychains/login.keychain-db`. 접미사는 전용 Keychain 경로 sha256의 앞 16자로, `node -e "console.log(require('crypto').createHash('sha256').update('<전용 Keychain 경로>').digest('hex').slice(0,16))"`로 재계산할 수 있다.
+  3. `pnpm setup:mac-local-signing`을 GUI 세션에서 다시 실행하고 신뢰 등록 프롬프트를 승인한다.
+
+- 주의: 로그인 Keychain 전체를 삭제·초기화하지 않는다. 위 파괴적 명령은 kyle의 현재 시점 승인 없이 실행하지 않는다.
+- 환경 점검은 아래처럼 전용 Keychain을 직접 지정해 실행한다. 출력에는 identity 이름과 hash만 남기며, 개인 키·인증서 파일·Keychain 비밀번호는 출력하거나 보고서에 복사하지 않는다.
+
+  ```sh
+  pnpm setup:mac-local-signing
+  security find-identity -v -p codesigning "$HOME/Library/Application Support/com.chickenbreastky.orca-kyle/local-signing/orca-kyle-local-signing.keychain-db"
+  ```
+
+- `pnpm build:mac`은 메인 앱, Computer Use helper, notification helper에 같은 `CSC_NAME`과 `CSC_KEYCHAIN`을 전달한다. 인증서가 없거나 서명 검증이 실패하면 다른 Keychain이나 ad-hoc identity로 바꾸지 않고 빌드를 중단한다.
 - 완료 증거: 같은 인증서로 연속 2회 빌드해 서명 신원이 유지되고, 두 번째 빌드에서 권한 재승인 없이 `computer capabilities`와 `computer list-apps`가 성공해야 한다.
+- 실제 TCC 검증을 안전하게 실행할 수 없는 환경에서는 위 서명 확인만으로 권한 유지까지 PASS 처리하지 말고, `accessibility=granted`, `screenshots=granted` 및 두 번째 빌드의 재승인 없는 성공을 미확인 관문으로 보고한다.
 - 근거: [paired live QA 보고서](../.orca/evidence/upstream-sync-1/card-7-r4-paired-live-qa/report.md), [빌드 검수 사소 s4 미실측 위험](../.orca/evidence/upstream-sync-1/card-6-build-review/report.md)
 
 ### ambient GIT_CONFIG_COUNT 간섭
