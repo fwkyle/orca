@@ -1,11 +1,9 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
+import { withElectronBuilderConfigTestFixture } from './electron-builder-config-test-fixture.mjs'
 import signing from './macos-local-signing.cjs'
-
-const require = createRequire(import.meta.url)
 
 const GENERATED_CERT_HASH = '5EE6B7B408C8E4D21F169376A37543BB2B9F0001'
 const UNTRUSTED_CERT_HASH = 'A32F4023600BFDC1E7684C97048FEA9ED87A0A79'
@@ -54,21 +52,29 @@ describe('macOS local signing contract', () => {
     expect(
       signing.localSigningEnvironment({
         identity: 'Orca Kyle Local Development Code Signing',
+        identityHash: UNTRUSTED_CERT_HASH,
         keychainPath: '/private/tmp/orca-local.keychain-db'
       })
     ).toEqual({
       ORCA_LOCAL_MAC_SIGNING: '1',
-      CSC_NAME: 'Orca Kyle Local Development Code Signing',
+      CSC_NAME: UNTRUSTED_CERT_HASH,
       CSC_KEYCHAIN: '/private/tmp/orca-local.keychain-db',
-      ORCA_LOCAL_MAC_SIGNING_IDENTITY: 'Orca Kyle Local Development Code Signing',
+      ORCA_LOCAL_MAC_SIGNING_IDENTITY: UNTRUSTED_CERT_HASH,
       ORCA_LOCAL_MAC_SIGNING_KEYCHAIN: '/private/tmp/orca-local.keychain-db'
     })
   })
 
   it('pins the non-release builder to the fixed identity without notarization', () => {
-    const config = require('../electron-builder.config.cjs')
-    expect(config.mac.identity).toBe(signing.LOCAL_MAC_SIGNING_IDENTITY)
-    expect(config.mac.notarize).toBe(false)
+    withElectronBuilderConfigTestFixture(
+      ({ requireConfig, securityCalls, existsCalls, keychainPath }) => {
+        const config = requireConfig()
+        expect(securityCalls).toHaveLength(0)
+        expect(existsCalls).not.toContain(keychainPath)
+        expect(config.mac.identity).toMatch(/^[0-9A-F]{40}$/)
+        expect(config.mac.notarize).toBe(false)
+        expect(securityCalls).toHaveLength(1)
+      }
+    )
   })
 
   it('fails closed away from macOS', () => {

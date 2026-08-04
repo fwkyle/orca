@@ -20,19 +20,20 @@ const bundleId =
 const displayName = 'Orca Kyle Computer Use'
 const universalTriples = ['arm64-apple-macosx', 'x86_64-apple-macosx']
 
-if (process.platform !== 'darwin') {
-  process.exit(0)
+function main() {
+  if (process.platform !== 'darwin') {
+    return
+  }
+  const localSigning =
+    process.env.ORCA_LOCAL_MAC_SIGNING === '1' && process.env.ORCA_MAC_RELEASE !== '1'
+      ? localSigningApi.resolveLocalMacSigningIdentity()
+      : null
+  const signingIdentity = resolveSigningIdentity({ localSigning })
+
+  buildUniversalBinary()
+  chmodSync(binaryPath, 0o755)
+  createHelperApp(localSigning, signingIdentity)
 }
-
-const localSigning =
-  process.env.ORCA_LOCAL_MAC_SIGNING === '1' && process.env.ORCA_MAC_RELEASE !== '1'
-    ? localSigningApi.verifyLocalMacSigningIdentity()
-    : null
-const signingIdentity = resolveSigningIdentity()
-
-buildUniversalBinary()
-chmodSync(binaryPath, 0o755)
-createHelperApp()
 
 function buildUniversalBinary() {
   const builtBinaries = universalTriples.map((triple) => {
@@ -43,7 +44,7 @@ function buildUniversalBinary() {
   run('lipo', ['-create', ...builtBinaries, '-output', binaryPath])
 }
 
-function createHelperApp() {
+function createHelperApp(localSigning, signingIdentity) {
   rmSync(appPath, { recursive: true, force: true })
   mkdirSync(path.dirname(appExecutablePath), { recursive: true })
   mkdirSync(path.join(appPath, 'Contents', 'Resources'), { recursive: true })
@@ -51,7 +52,9 @@ function createHelperApp() {
   copyFileSync(path.join(repoRoot, 'resources', 'build', 'icon.icns'), appIconPath)
   chmodSync(appExecutablePath, 0o755)
   writeFileSync(path.join(appPath, 'Contents', 'Info.plist'), infoPlist(), 'utf8')
-  const signer = spawnSync('codesign', codesignArgs(signingIdentity, appPath), { stdio: 'inherit' })
+  const signer = spawnSync('codesign', codesignArgs(signingIdentity, appPath, { localSigning }), {
+    stdio: 'inherit'
+  })
   if (signer.signal) {
     process.kill(process.pid, signer.signal)
   }
@@ -60,41 +63,69 @@ function createHelperApp() {
   }
 }
 
-function codesignArgs(identity, targetPath) {
-  const args = ['--force', '--deep']
-  if (localSigning) {
-    args.push('--timestamp=none', '--keychain', localSigning.keychainPath)
+export function codesignArgs(
+  identity,
+  targetPath,
+  { localSigning = null, env = process.env } = {}
+) {
+  const isMacRelease = env.ORCA_MAC_RELEASE === '1'
+  if (localSigning || (env.ORCA_LOCAL_MAC_SIGNING === '1' && !isMacRelease)) {
+    const identityHash = localSigningApi.requireIdentityHash(localSigning?.identityHash)
+    return localSigningApi.createLocalMacCodesignArgs(
+      identityHash,
+      targetPath,
+      localSigning?.keychainPath,
+      { deep: true }
+    )
   }
+  const args = ['--force', '--deep']
   args.push('--sign', identity)
-  if (process.env.ORCA_MAC_RELEASE === '1' && identity !== '-') {
+  if (isMacRelease && identity !== '-') {
     args.push('--options', 'runtime', '--timestamp', '--entitlements', entitlementsPath)
   }
   args.push(targetPath)
   return args
 }
 
-function resolveSigningIdentity() {
-  if (localSigning) {
-    return localSigning.identity
+export function resolveSigningIdentity({
+  localSigning = null,
+  env = process.env,
+  securityOutput
+} = {}) {
+  const isMacRelease = env.ORCA_MAC_RELEASE === '1'
+  if (localSigning || (env.ORCA_LOCAL_MAC_SIGNING === '1' && !isMacRelease)) {
+    if (!localSigning) {
+      throw new Error(
+        'Build-time local macOS signing did not return a verified identity hash; refusing name-based fallback.'
+      )
+    }
+    return localSigningApi.requireIdentityHash(localSigning.identityHash)
   }
-  const explicitIdentity = process.env.ORCA_COMPUTER_MACOS_SIGN_IDENTITY ?? process.env.CSC_NAME
+  const explicitIdentity = env.ORCA_COMPUTER_MACOS_SIGN_IDENTITY ?? env.CSC_NAME
   if (explicitIdentity) {
     return explicitIdentity
   }
-  const identities = spawnSync('security', ['find-identity', '-v', '-p', 'codesigning'], {
-    encoding: 'utf8'
-  })
+  const identities =
+    securityOutput === undefined
+      ? spawnSync('security', ['find-identity', '-v', '-p', 'codesigning'], {
+          encoding: 'utf8'
+        })
+      : { status: 0, stdout: securityOutput }
   if (identities.status !== 0 || !identities.stdout) {
     return '-'
   }
   const developmentMatch = identities.stdout.match(/"([^"]*Apple Development:[^"]+)"/)
-  if (process.env.ORCA_MAC_RELEASE !== '1' && developmentMatch) {
+  if (!isMacRelease && developmentMatch) {
     return developmentMatch[1]
   }
   const releaseMatch =
     identities.stdout.match(/"([^"]*Developer ID Application:[^"]+)"/) ??
     identities.stdout.match(/"([^"]*Apple Distribution:[^"]+)"/)
   return releaseMatch?.[1] ?? developmentMatch?.[1] ?? '-'
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === path.resolve(import.meta.filename)) {
+  main()
 }
 
 function run(command, args) {

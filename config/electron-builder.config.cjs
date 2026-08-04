@@ -17,7 +17,9 @@ const { verifyPackagedPluginResources } = require('./scripts/verify-packaged-plu
 const { verifySkillsCliRuntime } = require('./scripts/verify-skills-cli-runtime.cjs')
 const {
   LOCAL_MAC_SIGNING_IDENTITY,
-  getLocalMacSigningConfig
+  createLocalMacCodesignArgs,
+  requireIdentityHash,
+  resolveLocalMacSigningIdentity
 } = require('./scripts/macos-local-signing.cjs')
 
 // Why: dev-channel builds must carry the *release* identity — same bundle id,
@@ -27,7 +29,8 @@ const isMacHourly = process.env.ORCA_MAC_HOURLY === '1'
 const isMacAdhoc = process.env.ORCA_MAC_ADHOC === '1'
 const isMacRelease = process.env.ORCA_MAC_RELEASE === '1' || isMacHourly || isMacAdhoc
 const isMacLocal = process.platform === 'darwin' && !isMacRelease
-const localMacSigning = isMacLocal ? getLocalMacSigningConfig() : null
+let localMacSigning
+let localMacSigningResolved = false
 const isLinuxArm64Release = process.env.ORCA_LINUX_ARM64_RELEASE === '1'
 const localBuildVersion = isMacRelease ? undefined : process.env.ORCA_LOCAL_BUILD_VERSION
 const devChannelBuildVersion = isMacHourly
@@ -324,7 +327,13 @@ module.exports = {
     icon: 'resources/build/icon.icns',
     // Why: local builds must use the one dedicated development certificate so
     // macOS TCC can associate rebuilt apps with the same code identity.
-    identity: isMacRelease ? undefined : LOCAL_MAC_SIGNING_IDENTITY,
+    get identity() {
+      return getMacSigningIdentity({
+        isMacRelease,
+        isMacLocal,
+        localMacSigning: getLocalMacSigning()
+      })
+    },
     entitlements: 'resources/build/entitlements.mac.plist',
     entitlementsInherit: 'resources/build/entitlements.mac.plist',
     extendInfo: {
@@ -503,6 +512,15 @@ module.exports = {
   }
 }
 
+Object.defineProperty(module.exports, '__test', {
+  enumerable: false,
+  value: {
+    getMacSigningIdentity,
+    localComputerUseCodesignArgs,
+    localNotificationStatusCodesignArgs
+  }
+})
+
 function chmodUnixCliLaunchers(resourcesDir, electronPlatformName) {
   if (electronPlatformName === 'win32') {
     return
@@ -546,18 +564,19 @@ async function signMacComputerUseHelper(helperAppPath, packager) {
     isMacRelease && process.env.CSC_LINK && packager?.codeSigningInfo?.value
       ? await packager.codeSigningInfo.value
       : null
+  const localMacSigning = getLocalMacSigning()
   const identity = isMacRelease
     ? (process.env.ORCA_COMPUTER_MACOS_SIGN_IDENTITY ??
       process.env.CSC_NAME ??
       findInstalledMacSigningIdentity(codeSigningInfo?.keychainFile) ??
       null)
-    : localMacSigning?.identity
+    : localMacSigning?.identityHash
   if (!identity) {
     throw new Error('Missing signing identity for Orca Kyle Computer Use helper app')
   }
   // Why: TCC grants attach to this nested app's code identity. Sign it before
   // the outer Orca.app is sealed so production builds preserve that identity.
-  execFileSync('codesign', codesignArgs(identity, helperAppPath, localMacSigning?.keychainPath), {
+  execFileSync('codesign', codesignArgs(identity, helperAppPath), {
     stdio: 'inherit'
   })
   execFileSync('codesign', ['--verify', '--deep', '--strict', helperAppPath], {
@@ -576,11 +595,12 @@ async function signMacNotificationStatusHelper(helperPath, packager) {
     isMacRelease && process.env.CSC_LINK && packager?.codeSigningInfo?.value
       ? await packager.codeSigningInfo.value
       : null
+  const localMacSigning = getLocalMacSigning()
   const identity = isMacRelease
     ? (process.env.CSC_NAME ??
       findInstalledMacSigningIdentity(codeSigningInfo?.keychainFile) ??
       null)
-    : localMacSigning?.identity
+    : localMacSigning?.identityHash
   if (!identity) {
     throw new Error('Missing signing identity for orca-notification-status helper')
   }
@@ -588,24 +608,31 @@ async function signMacNotificationStatusHelper(helperPath, packager) {
   // binary embeds the app's CFBundleIdentifier in __TEXT,__info_plist so this
   // (and any later) `codesign --force` derives the correct identifier. Sign
   // before the outer Orca.app is sealed, like the computer-use helper.
-  const args = ['--force']
-  if (localMacSigning?.keychainPath) {
-    args.push('--timestamp=none', '--keychain', localMacSigning.keychainPath)
-  }
-  args.push('--sign', identity)
+  const args = isMacRelease
+    ? ['--force', '--sign', identity]
+    : localNotificationStatusCodesignArgs(
+        requireIdentityHash(identity),
+        helperPath,
+        localMacSigning?.keychainPath
+      )
   if (isMacRelease) {
     args.push('--options', 'runtime', '--timestamp')
   }
-  args.push(helperPath)
+  args.push(...(isMacRelease ? [helperPath] : []))
   execFileSync('codesign', args, { stdio: 'inherit' })
   execFileSync('codesign', ['--verify', '--strict', helperPath], { stdio: 'inherit' })
 }
 
-function codesignArgs(identity, targetPath, keychainPath) {
-  const args = ['--force', '--deep']
-  if (keychainPath) {
-    args.push('--timestamp=none', '--keychain', keychainPath)
+function codesignArgs(identity, targetPath) {
+  const localMacSigning = getLocalMacSigning()
+  if (localMacSigning) {
+    return localComputerUseCodesignArgs(
+      requireIdentityHash(localMacSigning.identityHash),
+      targetPath,
+      localMacSigning.keychainPath
+    )
   }
+  const args = ['--force', '--deep']
   args.push('--sign', identity)
   if (isMacRelease) {
     args.push(
@@ -618,6 +645,35 @@ function codesignArgs(identity, targetPath, keychainPath) {
   }
   args.push(targetPath)
   return args
+}
+
+function getLocalMacSigning() {
+  if (!isMacLocal) {
+    return null
+  }
+  if (!localMacSigningResolved) {
+    localMacSigning = resolveLocalMacSigningIdentity()
+    localMacSigningResolved = true
+  }
+  return localMacSigning
+}
+
+function getMacSigningIdentity({ isMacRelease, isMacLocal, localMacSigning }) {
+  if (isMacRelease) {
+    return undefined
+  }
+  if (isMacLocal) {
+    return requireIdentityHash(localMacSigning?.identityHash)
+  }
+  return LOCAL_MAC_SIGNING_IDENTITY
+}
+
+function localComputerUseCodesignArgs(identityHash, targetPath, keychainPath) {
+  return createLocalMacCodesignArgs(identityHash, targetPath, keychainPath, { deep: true })
+}
+
+function localNotificationStatusCodesignArgs(identityHash, targetPath, keychainPath) {
+  return createLocalMacCodesignArgs(identityHash, targetPath, keychainPath)
 }
 
 function findInstalledMacSigningIdentity(keychainFile) {

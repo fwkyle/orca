@@ -1,6 +1,7 @@
-const { execFileSync } = require('node:child_process')
+const nodeChildProcess = require('node:child_process')
 const { createHash, randomBytes } = require('node:crypto')
-const { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } = require('node:fs')
+const nodeFileSystem = require('node:fs')
+const { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } = nodeFileSystem
 const { homedir, tmpdir, userInfo } = require('node:os')
 const { dirname, join } = require('node:path')
 
@@ -16,6 +17,7 @@ const LOCAL_MAC_SIGNING_KEYCHAIN_DIR = join(
 const LOCAL_MAC_SIGNING_KEYCHAIN_NAME = 'orca-kyle-local-signing.keychain-db'
 const LOCAL_MAC_SIGNING_PASSWORD_SERVICE = 'local-signing-keychain-password'
 const LOCAL_SIGNING_P12_PASSWORD_ENV = 'ORCA_LOCAL_SIGNING_P12_PASSWORD'
+const SHA1_IDENTITY_PATTERN = /^[0-9A-F]{40}$/i
 // add-trusted-cert -d waits on the macOS administrator password prompt, so allow human time.
 const ADMIN_PROMPT_TIMEOUT_MS = 120000
 
@@ -37,53 +39,128 @@ function getLocalMacSigningConfig(env = process.env, home = homedir()) {
 function parseIdentityEntries(output, identity = LOCAL_MAC_SIGNING_IDENTITY) {
   const entries = []
   for (const line of output.split('\n')) {
-    if (!line.includes(`"${identity}"`)) {
+    const match = line.match(/^\s*\d+\)\s+(\S+)\s+"([^"]*)"(?:\s+\(([^)]*)\))?\s*$/)
+    if (!match || match[2] !== identity) {
       continue
     }
-    const match = line.match(/^\s*\d+\)\s+([0-9A-F]{40})\s+"[^"]*"(?:\s+\(([^)]*)\))?\s*$/i)
-    if (match) {
-      entries.push({ hash: match[1].toUpperCase(), status: match[2] ?? null })
-    }
+    entries.push({
+      hash: SHA1_IDENTITY_PATTERN.test(match[1]) ? match[1].toUpperCase() : null,
+      rawHash: match[1],
+      status: match[3] ?? null
+    })
   }
   return entries
 }
 
 function findMatchingIdentityHashes(output, identity = LOCAL_MAC_SIGNING_IDENTITY) {
   return parseIdentityEntries(output, identity)
-    .filter((entry) => entry.status === null)
+    .filter((entry) => entry.hash && entry.status === null)
     .map((entry) => entry.hash)
 }
 
 function findUntrustedIdentityEntries(output, identity = LOCAL_MAC_SIGNING_IDENTITY) {
-  return parseIdentityEntries(output, identity).filter((entry) => entry.status !== null)
+  return parseIdentityEntries(output, identity)
+    .filter((entry) => entry.hash && entry.status !== null)
+    .map(({ hash, status }) => ({ hash, status }))
+}
+
+function findMalformedIdentityEntries(output, identity = LOCAL_MAC_SIGNING_IDENTITY) {
+  return parseIdentityEntries(output, identity).filter((entry) => !entry.hash)
+}
+
+function requireIdentityHash(identityHash, label = 'local macOS signing identity SHA-1') {
+  if (typeof identityHash !== 'string' || !SHA1_IDENTITY_PATTERN.test(identityHash)) {
+    throw new Error(`${label} must be exactly 40 hexadecimal characters.`)
+  }
+  return identityHash.toUpperCase()
+}
+
+function resolveExpectedLocalMacSigningIdentityHash(env = process.env) {
+  const configuredValues = [
+    ['CSC_NAME', env.CSC_NAME],
+    ['ORCA_LOCAL_MAC_SIGNING_IDENTITY', env.ORCA_LOCAL_MAC_SIGNING_IDENTITY]
+  ].filter(([, value]) => value !== undefined)
+  if (configuredValues.length === 0) {
+    return null
+  }
+  const hashes = configuredValues.map(([name, value]) =>
+    requireIdentityHash(value, `${name} local signing identity SHA-1`)
+  )
+  if (new Set(hashes).size !== 1) {
+    throw new Error(
+      `Local macOS signing identity SHA-1 values disagree (${configuredValues.map(([name]) => name).join(', ')}); refusing name-based fallback.`
+    )
+  }
+  return hashes[0]
 }
 
 function localSigningEnvironment(config) {
+  if (config?.identity !== LOCAL_MAC_SIGNING_IDENTITY) {
+    throw new Error(
+      `Local macOS signing environment requires the fixed identity "${LOCAL_MAC_SIGNING_IDENTITY}".`
+    )
+  }
+  const identityHash = requireIdentityHash(config?.identityHash)
   return {
     [LOCAL_MAC_SIGNING_MARKER_ENV]: '1',
-    CSC_NAME: config.identity,
+    CSC_NAME: identityHash,
     CSC_KEYCHAIN: config.keychainPath,
-    ORCA_LOCAL_MAC_SIGNING_IDENTITY: config.identity,
+    ORCA_LOCAL_MAC_SIGNING_IDENTITY: identityHash,
     [LOCAL_MAC_SIGNING_KEYCHAIN_ENV]: config.keychainPath
   }
+}
+
+function createLocalMacCodesignArgs(identityHash, targetPath, keychainPath, { deep = false } = {}) {
+  const resolvedHash = requireIdentityHash(identityHash)
+  if (typeof keychainPath !== 'string' || !keychainPath.startsWith('/')) {
+    throw new Error('Local macOS signing codesign keychain path must be absolute.')
+  }
+  const args = ['--force']
+  if (deep) {
+    args.push('--deep')
+  }
+  args.push('--timestamp=none', '--keychain', keychainPath, '--sign', resolvedHash, targetPath)
+  return args
 }
 
 function verifyLocalMacSigningIdentity({
   env = process.env,
   home = homedir(),
   platform = process.platform,
-  run = runCommand
+  run = runCommand,
+  expectedIdentityHash
 } = {}) {
   requireMacOS(platform)
   const config = getLocalMacSigningConfig(env, home)
-  if (!existsSync(config.keychainPath)) {
+  if (!nodeFileSystem.existsSync(config.keychainPath)) {
     throw missingIdentityError(config)
   }
   const inspection = inspectSigningIdentities(config, run)
-  if (inspection.usable.length !== 1) {
+  if (inspection.malformed.length > 0 || inspection.usable.length !== 1) {
     throw identityInspectionError(config, inspection)
   }
-  return { ...config, identityHash: inspection.usable[0] }
+  const identityHash = requireIdentityHash(inspection.usable[0])
+  if (expectedIdentityHash !== undefined && expectedIdentityHash !== null) {
+    const expectedHash = requireIdentityHash(
+      expectedIdentityHash,
+      'Expected local signing identity SHA-1'
+    )
+    if (expectedHash !== identityHash) {
+      throw new Error(
+        `Build-time local macOS signing identity SHA-1 ${identityHash} does not match the verified expected SHA-1 ${expectedHash}; refusing name-based fallback.`
+      )
+    }
+  }
+  return { ...config, identityHash }
+}
+
+// Build entry points call this after setup so the dedicated keychain is resolved again at build time.
+function resolveLocalMacSigningIdentity({ env = process.env, ...options } = {}) {
+  return verifyLocalMacSigningIdentity({
+    env,
+    ...options,
+    expectedIdentityHash: resolveExpectedLocalMacSigningIdentityHash(env) ?? undefined
+  })
 }
 
 function ensureLocalMacSigningIdentity({
@@ -97,7 +174,7 @@ function ensureLocalMacSigningIdentity({
   mkdirSync(dirname(config.keychainPath), { recursive: true, mode: 0o700 })
 
   let password = readStoredKeychainPassword(config, home, run)
-  const keychainExists = existsSync(config.keychainPath)
+  const keychainExists = nodeFileSystem.existsSync(config.keychainPath)
   if (keychainExists && password) {
     unlockKeychain(config, password, run)
   }
@@ -107,7 +184,10 @@ function ensureLocalMacSigningIdentity({
 
   const inspection = keychainExists
     ? tryInspectSigningIdentities(config, run)
-    : { usable: [], untrusted: [] }
+    : { usable: [], untrusted: [], malformed: [] }
+  if (inspection.malformed.length > 0) {
+    throw identityInspectionError(config, inspection)
+  }
   if (inspection.usable.length === 1) {
     allowCodeSignKeyAccess(config, password, run)
     return { ...config, identityHash: inspection.usable[0] }
@@ -145,10 +225,10 @@ function ensureLocalMacSigningIdentity({
   ensureKeychainSearchList(config.keychainPath, run)
   createLocalCertificate(config, password, run)
   const created = tryInspectSigningIdentities(config, run)
-  if (created.usable.length !== 1) {
+  if (created.malformed.length > 0 || created.usable.length !== 1) {
     throw identityInspectionError(config, created)
   }
-  return { ...config, identityHash: created.usable[0] }
+  return { ...config, identityHash: requireIdentityHash(created.usable[0]) }
 }
 
 // Recovery path: trust exactly the certificate whose SHA-1 matches the existing identity.
@@ -222,7 +302,8 @@ function inspectSigningIdentities(config, run) {
   ])
   return {
     usable: findMatchingIdentityHashes(output, config.identity),
-    untrusted: findUntrustedIdentityEntries(output, config.identity)
+    untrusted: findUntrustedIdentityEntries(output, config.identity),
+    malformed: findMalformedIdentityEntries(output, config.identity)
   }
 }
 
@@ -230,7 +311,7 @@ function tryInspectSigningIdentities(config, run) {
   try {
     return inspectSigningIdentities(config, run)
   } catch {
-    return { usable: [], untrusted: [] }
+    return { usable: [], untrusted: [], malformed: [] }
   }
 }
 
@@ -489,7 +570,7 @@ function unlockKeychain(config, password, run) {
 
 function runCommand(command, args, { timeoutMs, input, env, label, sensitiveValues = [] } = {}) {
   try {
-    return execFileSync(command, args, {
+    return nodeChildProcess.execFileSync(command, args, {
       encoding: 'utf8',
       stdio: ['pipe', 'pipe', 'pipe'],
       ...(input === undefined ? {} : { input }),
@@ -552,6 +633,11 @@ function invalidIdentityError(config) {
 }
 
 function identityInspectionError(config, inspection) {
+  if (inspection.malformed?.length > 0) {
+    return new Error(
+      `Found malformed local macOS signing identity SHA-1 entries in ${config.keychainPath} (${inspection.malformed.map((entry) => entry.rawHash).join(', ')}); refusing name-based fallback. Follow the manual recovery procedure in docs/upstream-sync-playbook.md.`
+    )
+  }
   if (inspection.usable.length > 1) {
     return new Error(
       `Expected one fixed local macOS signing identity in ${config.keychainPath}, found ${inspection.usable.length} usable (SHA-1: ${inspection.usable.join(', ')}); refusing automatic selection. Follow the manual recovery procedure in docs/upstream-sync-playbook.md.`
@@ -597,11 +683,16 @@ module.exports = {
   LOCAL_MAC_SIGNING_IDENTITY,
   LOCAL_MAC_SIGNING_KEYCHAIN_ENV,
   LOCAL_MAC_SIGNING_MARKER_ENV,
+  createLocalMacCodesignArgs,
   ensureLocalMacSigningIdentity,
   findMatchingIdentityHashes,
+  findMalformedIdentityEntries,
   findUntrustedIdentityEntries,
   getLocalMacSigningConfig,
   localSigningEnvironment,
   runCommand,
+  requireIdentityHash,
+  resolveExpectedLocalMacSigningIdentityHash,
+  resolveLocalMacSigningIdentity,
   verifyLocalMacSigningIdentity
 }
