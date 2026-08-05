@@ -103,6 +103,7 @@ Orchestration:
   orchestration inbox       Show all messages across recipients
   orchestration task-create Create an orchestration task
   orchestration task-list   List orchestration tasks
+  orchestration task-handoff Hand an inbox task to a Run
   orchestration task-update Update a task status
   orchestration dispatch    Dispatch a task to a terminal
   orchestration dispatch-show Show dispatch context for a task

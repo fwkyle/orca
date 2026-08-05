@@ -18,6 +18,8 @@ export type MessageDeliveryContract = 'legacy_direct' | 'current_delivery' | 'au
 
 export type TaskStatus = 'pending' | 'ready' | 'dispatched' | 'completed' | 'failed' | 'blocked'
 
+export type TaskAssignmentState = 'inbox' | 'assigned'
+
 export type DispatchStatus = 'pending' | 'dispatched' | 'completed' | 'failed' | 'circuit_broken'
 
 export type WorkerReportOutcome = 'succeeded' | 'failed'
@@ -243,7 +245,8 @@ export type MessageRow = {
 
 export type TaskRow = {
   id: string
-  run_id: string
+  run_id: string | null
+  assignment_state: TaskAssignmentState
   parent_id: string | null
   created_by_terminal_handle: string | null
   task_title: string | null

@@ -4319,6 +4319,17 @@
           "ca6f729da2": "New workspace ({{value0}})",
           "a30e34eb5c": "Close workspace board"
         },
+        "OrchestrationTaskSection": {
+          "title": "Tasks",
+          "inboxCount": "{{value0}} inbox",
+          "inboxCountAriaLabel": "{{value0}} inbox tasks",
+          "handoffTask": "Hand off {{value0}}",
+          "loadError": "Could not load tasks.",
+          "handoffError": "Could not hand off the task.",
+          "empty": "Inbox is empty",
+          "handoffTitle": "Hand off to Run",
+          "chooseRun": "Choose a Run"
+        },
         "SidebarNav": {
           "80611a8b10": "Search",
           "0c3395fd32": "Search worktrees and browser tabs",

@@ -820,10 +820,10 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
 
   'orchestration task-list': async ({ flags, client, cwd, json }) => {
     const brief = flags.has('brief')
+    const inbox = flags.has('inbox')
     const run = getOptionalStringFlag(flags, 'run')
-    const callerTerminalHandle = run
-      ? undefined
-      : await resolveCoordinatorTerminalHandle(flags, cwd, client)
+    const callerTerminalHandle =
+      run || inbox ? undefined : await resolveCoordinatorTerminalHandle(flags, cwd, client)
     const result = await client.call<{
       tasks: {
         id: string
@@ -842,6 +842,7 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
       status: getOptionalStringFlag(flags, 'status'),
       ready: flags.has('ready') ? true : undefined,
       brief: brief ? true : undefined,
+      assignmentState: inbox ? 'inbox' : undefined,
       run,
       callerTerminalHandle
     })
@@ -870,6 +871,19 @@ export const ORCHESTRATION_HANDLERS: Record<string, CommandHandler> = {
         .join('\n')
       return r.legacyReadOnly ? `Legacy Run ${r.runId} (read-only)\n${tasks}` : tasks
     })
+  },
+
+  'orchestration task-handoff': async ({ flags, client, json }) => {
+    const result = await callMutation<{ task: { id: string; status: string } }>(
+      client,
+      flags,
+      'orchestration.taskHandoff',
+      {
+        id: getRequiredStringFlag(flags, 'id'),
+        run: getRequiredStringFlag(flags, 'run')
+      }
+    )
+    printResult(result, json, (r) => `Handed off ${r.task.id} [${r.task.status}]`)
   },
 
   'orchestration task-update': async ({ flags, client, cwd, json }) => {

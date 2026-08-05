@@ -200,7 +200,14 @@ const TaskListParams = z.object({
   ready: OptionalBoolean,
   // Why: server-side truncation keeps --brief cheap over SSH/relay instead of shipping full specs the CLI throws away.
   brief: OptionalBoolean,
+  assignmentState: z.enum(['inbox', 'assigned']).optional(),
   run: OptionalString,
+  callerTerminalHandle: OptionalString
+})
+
+const TaskHandoffParams = z.object({
+  id: requiredString('Missing --id'),
+  run: requiredString('Missing --run'),
   callerTerminalHandle: OptionalString
 })
 
@@ -1259,13 +1266,17 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         deps,
         parentId: params.parent,
         createdByTerminalHandle: params.callerTerminalHandle,
-        runId: resolveRunScope(runtime, {
-          runId: params.run,
-          callerTerminalHandle: params.callerTerminalHandle,
-          requireCurrentConsumer: true,
-          legacyCoordinatorRunId,
-          callerEvidence: orchestrationCompatibilityEvidence
-        }).id
+        runId:
+          params.run === undefined
+            ? null
+            : resolveRunScope(runtime, {
+                runId: params.run,
+                callerTerminalHandle: params.callerTerminalHandle,
+                requireCurrentConsumer: true,
+                legacyCoordinatorRunId,
+                callerEvidence: orchestrationCompatibilityEvidence
+              }).id,
+        assignmentState: params.run === undefined ? 'inbox' : 'assigned'
       })
       return { task }
     }
@@ -1276,22 +1287,31 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
     params: TaskListParams,
     handler: (params, { orchestrationCompatibilityEvidence, runtime, legacyCoordinatorRunId }) => {
       const db = runtime.getOrchestrationDb()
+      if (params.assignmentState === 'inbox' && params.run !== undefined) {
+        throw new OrchestrationError(
+          'invalid_argument',
+          'Inbox task listing cannot be combined with --run; inbox tasks have no Run.'
+        )
+      }
       const explicitRun = params.run ? db.getRun(params.run) : undefined
       const run =
-        explicitRun?.legacy === 1
-          ? explicitRun
-          : resolveRunScope(runtime, {
-              runId: params.run,
-              callerTerminalHandle: params.callerTerminalHandle,
-              requireCurrentConsumer: params.run === undefined,
-              legacyCoordinatorRunId,
-              callerEvidence: orchestrationCompatibilityEvidence
-            })
+        params.assignmentState === 'inbox'
+          ? null
+          : explicitRun?.legacy === 1
+            ? explicitRun
+            : resolveRunScope(runtime, {
+                runId: params.run,
+                callerTerminalHandle: params.callerTerminalHandle,
+                requireCurrentConsumer: params.run === undefined,
+                legacyCoordinatorRunId,
+                callerEvidence: orchestrationCompatibilityEvidence
+              })
       // Why: listTasksWithDispatch adds assignee_handle + dispatch_id (NULL for non-dispatched), so legacy-shape consumers are unaffected.
       const joined = db.listTasksWithDispatch({
         status: params.status as TaskStatus,
         ready: params.ready,
-        runId: run.id
+        ...(run ? { runId: run.id } : {}),
+        assignmentState: params.assignmentState
       })
       const tasks = joined.map((row) => {
         const { assignee_handle, dispatch_id, ...base } = row
@@ -1301,11 +1321,41 @@ export const ORCHESTRATION_METHODS: RpcMethod[] = [
         return base
       })
       return {
-        runId: run.id,
-        legacyReadOnly: run.legacy === 1,
+        runId: run?.id ?? null,
+        legacyReadOnly: run?.legacy === 1,
         tasks: params.brief ? abbreviateOrchestrationTasks(tasks) : tasks,
         count: tasks.length
       }
+    }
+  }),
+
+  defineMethod({
+    name: 'orchestration.taskHandoff',
+    params: TaskHandoffParams,
+    handler: (params, { orchestrationCompatibilityEvidence, runtime, legacyCoordinatorRunId }) => {
+      const db = runtime.getOrchestrationDb()
+      const run = resolveRunScope(runtime, {
+        runId: params.run,
+        callerTerminalHandle: params.callerTerminalHandle,
+        requireCurrentConsumer: params.callerTerminalHandle !== undefined,
+        legacyCoordinatorRunId,
+        callerEvidence: orchestrationCompatibilityEvidence
+      })
+      const existing = db.getTask(params.id)
+      if (!existing || existing.assignment_state !== 'inbox' || existing.run_id !== null) {
+        throw new OrchestrationError(
+          'task_not_in_inbox',
+          `Task ${params.id} is not an inbox task and cannot be handed off.`
+        )
+      }
+      const task = db.handoffTask(params.id, run.id)
+      if (!task) {
+        throw new OrchestrationError(
+          'task_not_in_inbox',
+          `Task ${params.id} is no longer an inbox task.`
+        )
+      }
+      return { task }
     }
   }),
 

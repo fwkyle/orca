@@ -60,7 +60,7 @@ describe('worker terminal resource backfill migration (schema v25)', () => {
     const ctxId = seedLegacyWorkerDispatch(dbPath, 22)
 
     db = new OrchestrationDb(dbPath)
-    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(25)
+    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(26)
     expect(countWorkerTerminalResources(db)).toBe(1)
     const resource = db.getWorkerTerminalResourceByOwner(ctxId)
     expect(resource).toBeDefined()
@@ -75,7 +75,7 @@ describe('worker terminal resource backfill migration (schema v25)', () => {
     const ctxId = seedLegacyWorkerDispatch(dbPath, 23)
 
     db = new OrchestrationDb(dbPath)
-    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(25)
+    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(26)
     expect(countWorkerTerminalResources(db)).toBe(1)
     const resource = db.getWorkerTerminalResourceByOwner(ctxId)
     expect(resource?.terminal_handle).toBe('pty_handle_seed')
@@ -87,7 +87,7 @@ describe('worker terminal resource backfill migration (schema v25)', () => {
     const ctxId = seedLegacyWorkerDispatch(dbPath, 24)
 
     db = new OrchestrationDb(dbPath)
-    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(25)
+    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(26)
     expect(countWorkerTerminalResources(db)).toBe(1)
     const resource = db.getWorkerTerminalResourceByOwner(ctxId)
     expect(resource?.terminal_handle).toBe('pty_handle_seed')
@@ -122,7 +122,7 @@ describe('worker terminal resource backfill migration (schema v25)', () => {
     raw.close()
 
     db = new OrchestrationDb(dbPath)
-    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(25)
+    expect(sqliteFor(db).pragma('user_version', { simple: true })).toBe(26)
     expect(countWorkerTerminalResources(db)).toBe(0)
   })
 })
