@@ -3,9 +3,16 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import {
+  installElectronBuilderConfigTestFixture,
+  withElectronBuilderConfigTestFixture
+} from './electron-builder-config-test-fixture.mjs'
 
 const require = createRequire(import.meta.url)
-const electronBuilderConfig = require('../electron-builder.config.cjs')
+const electronBuilderConfig = withElectronBuilderConfigTestFixture(({ requireConfig }) =>
+  requireConfig()
+)
+const { validateConfiguration } = require('app-builder-lib/out/util/config/config')
 const { FileMatcher } = require('app-builder-lib/out/fileMatcher')
 const electronBuilderNativeRebuild = require('./electron-builder-native-rebuild.cjs')
 const {
@@ -19,43 +26,81 @@ const {
   verifyPackagedMainRuntimeDeps
 } = require('../packaged-runtime-node-modules.cjs')
 
-const MUTABLE_BUILD_ENV = [
-  'ORCA_MAC_HOURLY',
-  'ORCA_MAC_ADHOC',
-  'ORCA_MAC_RELEASE',
-  'ORCA_HOURLY_BUILD_VERSION',
-  'ORCA_ADHOC_BUILD_VERSION',
-  'ORCA_LOCAL_BUILD_VERSION'
-]
-
-/** Re-requires the config under a temporary env, then restores env and module cache. */
 function withEnv(env, assert) {
-  const configPath = require.resolve('../electron-builder.config.cjs')
-  const original = Object.fromEntries(MUTABLE_BUILD_ENV.map((key) => [key, process.env[key]]))
-  try {
-    for (const key of MUTABLE_BUILD_ENV) {
-      delete process.env[key]
-    }
-    Object.assign(process.env, env)
-    delete require.cache[configPath]
-    assert(require('../electron-builder.config.cjs'))
-  } finally {
-    for (const [key, value] of Object.entries(original)) {
-      if (value === undefined) {
-        delete process.env[key]
-      } else {
-        process.env[key] = value
-      }
-    }
-    delete require.cache[configPath]
-    require('../electron-builder.config.cjs')
-  }
+  return withElectronBuilderConfigTestFixture(({ requireConfig }) => assert(requireConfig()), {
+    env
+  })
 }
 
 const withHourlyEnv = (assert) => withEnv({ ORCA_MAC_HOURLY: '1' }, assert)
 const withAdhocEnv = (assert) => withEnv({ ORCA_MAC_ADHOC: '1' }, assert)
 
 describe('electron-builder config', () => {
+  it('imports without Keychain access and exposes no test-only configuration keys', () => {
+    let fixture
+    withElectronBuilderConfigTestFixture((activeFixture) => {
+      fixture = activeFixture
+      const config = activeFixture.requireConfig()
+      expect(activeFixture.securityCalls).toHaveLength(0)
+      expect(activeFixture.existsCalls).not.toContain(activeFixture.keychainPath)
+      expect(Reflect.ownKeys(config)).not.toContain('__test')
+    })
+    expect(fixture.isRestored()).toBe(true)
+  })
+
+  it('passes the real electron-builder 26.15.3 schema validation path', async () => {
+    const fixture = installElectronBuilderConfigTestFixture()
+    try {
+      const config = fixture.requireConfig()
+      expect(fixture.securityCalls).toHaveLength(0)
+      await expect(
+        validateConfiguration(config, {
+          isEnabled: false,
+          add: () => undefined
+        })
+      ).resolves.toBeUndefined()
+    } finally {
+      fixture.restore()
+    }
+    expect(fixture.isRestored()).toBe(true)
+  })
+
+  it('restores the config fixture after a successful local identity read', () => {
+    let fixture
+    withElectronBuilderConfigTestFixture((activeFixture) => {
+      fixture = activeFixture
+      expect(activeFixture.securityCalls).toHaveLength(0)
+      expect(activeFixture.requireConfig().mac.identity).toMatch(/^[0-9A-F]{40}$/)
+    })
+    expect(fixture.isRestored()).toBe(true)
+  })
+
+  it('restores the config fixture when the assertion throws', () => {
+    let fixture
+    expect(() =>
+      withElectronBuilderConfigTestFixture((activeFixture) => {
+        fixture = activeFixture
+        activeFixture.requireConfig()
+        throw new Error('fixture assertion failed')
+      })
+    ).toThrow('fixture assertion failed')
+    expect(fixture.isRestored()).toBe(true)
+  })
+
+  it('restores the config fixture when lazy local signing resolution throws', () => {
+    let fixture
+    expect(() =>
+      withElectronBuilderConfigTestFixture(
+        (activeFixture) => {
+          fixture = activeFixture
+          return activeFixture.requireConfig().mac.identity
+        },
+        { identityOutput: '     0 valid identities found' }
+      )
+    ).toThrow('was not found')
+    expect(fixture.isRestored()).toBe(true)
+  })
+
   it('keeps the packaged app identity aligned with local-build validation', () => {
     expect(electronBuilderConfig.appId).toBe(
       require('../../src/shared/local-build-compatibility-contract.json').appId
@@ -232,75 +277,26 @@ describe('electron-builder config', () => {
   })
 
   it('uses a distinct AppImage name for Linux arm64 release uploads', () => {
-    const configPath = require.resolve('../electron-builder.config.cjs')
-    const original = process.env.ORCA_LINUX_ARM64_RELEASE
-    try {
-      delete require.cache[configPath]
-      process.env.ORCA_LINUX_ARM64_RELEASE = '1'
-      expect(require('../electron-builder.config.cjs').appImage.artifactName).toBe(
-        'orca-kyle-linux-arm64.${ext}'
-      )
-    } finally {
-      if (original === undefined) {
-        delete process.env.ORCA_LINUX_ARM64_RELEASE
-      } else {
-        process.env.ORCA_LINUX_ARM64_RELEASE = original
-      }
-      delete require.cache[configPath]
-      require('../electron-builder.config.cjs')
-    }
+    withEnv({ ORCA_LINUX_ARM64_RELEASE: '1' }, (config) => {
+      expect(config.appImage.artifactName).toBe('orca-kyle-linux-arm64.${ext}')
+    })
   })
 
   it('overrides packaged semver only for local macOS builds', () => {
-    const configPath = require.resolve('../electron-builder.config.cjs')
-    const original = process.env.ORCA_LOCAL_BUILD_VERSION
-    const originalMacRelease = process.env.ORCA_MAC_RELEASE
-    try {
-      delete require.cache[configPath]
-      delete process.env.ORCA_MAC_RELEASE
-      process.env.ORCA_LOCAL_BUILD_VERSION = '1.4.159-rc.0.local.123.abc'
-      expect(require('../electron-builder.config.cjs').extraMetadata).toEqual({
+    withEnv({ ORCA_LOCAL_BUILD_VERSION: '1.4.159-rc.0.local.123.abc' }, (config) => {
+      expect(config.extraMetadata).toEqual({
         version: '1.4.159-rc.0.local.123.abc'
       })
-    } finally {
-      if (originalMacRelease === undefined) {
-        delete process.env.ORCA_MAC_RELEASE
-      } else {
-        process.env.ORCA_MAC_RELEASE = originalMacRelease
-      }
-      if (original === undefined) {
-        delete process.env.ORCA_LOCAL_BUILD_VERSION
-      } else {
-        process.env.ORCA_LOCAL_BUILD_VERSION = original
-      }
-      delete require.cache[configPath]
-      require('../electron-builder.config.cjs')
-    }
+    })
   })
 
   it('never applies local semver to release packaging', () => {
-    const configPath = require.resolve('../electron-builder.config.cjs')
-    const originalLocalVersion = process.env.ORCA_LOCAL_BUILD_VERSION
-    const originalMacRelease = process.env.ORCA_MAC_RELEASE
-    try {
-      delete require.cache[configPath]
-      process.env.ORCA_LOCAL_BUILD_VERSION = '1.4.159-local.123.abc'
-      process.env.ORCA_MAC_RELEASE = '1'
-      expect(require('../electron-builder.config.cjs').extraMetadata).toBeUndefined()
-    } finally {
-      if (originalLocalVersion === undefined) {
-        delete process.env.ORCA_LOCAL_BUILD_VERSION
-      } else {
-        process.env.ORCA_LOCAL_BUILD_VERSION = originalLocalVersion
+    withEnv(
+      { ORCA_LOCAL_BUILD_VERSION: '1.4.159-local.123.abc', ORCA_MAC_RELEASE: '1' },
+      (config) => {
+        expect(config.extraMetadata).toBeUndefined()
       }
-      if (originalMacRelease === undefined) {
-        delete process.env.ORCA_MAC_RELEASE
-      } else {
-        process.env.ORCA_MAC_RELEASE = originalMacRelease
-      }
-      delete require.cache[configPath]
-      require('../electron-builder.config.cjs')
-    }
+    )
   })
 
   // Why: Squirrel.Mac swaps the .app in place only when the replacement carries the
@@ -357,7 +353,7 @@ describe('electron-builder config', () => {
   // argument apply. Only the destination repo differs.
   it('builds adhoc artifacts with the release identity and its own repo', () => {
     withAdhocEnv((config) => {
-      expect(config.appId).toBe('com.stablyai.orca')
+      expect(config.appId).toBe('com.chickenbreastky.orca-kyle')
       expect(config.mac.hardenedRuntime).toBe(true)
       expect(config.mac.notarize).toBe(true)
       expect(config.forceCodeSigning).toBe(true)

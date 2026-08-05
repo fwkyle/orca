@@ -15,6 +15,15 @@ const { verifyLinuxGlibcFloor } = require('./scripts/verify-linux-glibc-floor.cj
 const { writeMacBuildCompatibility } = require('./scripts/mac-build-compatibility.cjs')
 const { verifyPackagedPluginResources } = require('./scripts/verify-packaged-plugin-resources.cjs')
 const { verifySkillsCliRuntime } = require('./scripts/verify-skills-cli-runtime.cjs')
+const {
+  requireIdentityHash,
+  resolveLocalMacSigningIdentity
+} = require('./scripts/macos-local-signing.cjs')
+const {
+  getMacSigningIdentity,
+  localComputerUseCodesignArgs,
+  localNotificationStatusCodesignArgs
+} = require('./scripts/macos-signing-policy.cjs')
 
 // Why: dev-channel builds must carry the *release* identity — same bundle id,
 // Developer ID signature, and notarization ticket — or Squirrel.Mac refuses to
@@ -22,6 +31,9 @@ const { verifySkillsCliRuntime } = require('./scripts/verify-skills-cli-runtime.
 const isMacHourly = process.env.ORCA_MAC_HOURLY === '1'
 const isMacAdhoc = process.env.ORCA_MAC_ADHOC === '1'
 const isMacRelease = process.env.ORCA_MAC_RELEASE === '1' || isMacHourly || isMacAdhoc
+const isMacLocal = process.platform === 'darwin' && !isMacRelease
+let localMacSigning
+let localMacSigningResolved = false
 const isLinuxArm64Release = process.env.ORCA_LINUX_ARM64_RELEASE === '1'
 const localBuildVersion = isMacRelease ? undefined : process.env.ORCA_LOCAL_BUILD_VERSION
 const devChannelBuildVersion = isMacHourly
@@ -264,7 +276,10 @@ module.exports = {
       chmodSync(join(resourcesDir, filename), 0o755)
     }
     if (context.electronPlatformName === 'darwin') {
-      await signMacComputerUseHelper(join(resourcesDir, 'Orca Kyle Computer Use.app'), context.packager)
+      await signMacComputerUseHelper(
+        join(resourcesDir, 'Orca Kyle Computer Use.app'),
+        context.packager
+      )
       await signMacNotificationStatusHelper(
         join(resourcesDir, '..', 'MacOS', 'orca-notification-status'),
         context.packager
@@ -313,6 +328,15 @@ module.exports = {
   },
   mac: {
     icon: 'resources/build/icon.icns',
+    // Why: local builds must use the one dedicated development certificate so
+    // macOS TCC can associate rebuilt apps with the same code identity.
+    get identity() {
+      return getMacSigningIdentity({
+        isMacRelease,
+        isMacLocal,
+        localMacSigning: getLocalMacSigning()
+      })
+    },
     entitlements: 'resources/build/entitlements.mac.plist',
     entitlementsInherit: 'resources/build/entitlements.mac.plist',
     extendInfo: {
@@ -395,7 +419,9 @@ module.exports = {
   },
   // Why: release builds should fail if signing is unavailable instead of
   // silently downgrading to ad-hoc artifacts that look shippable in CI logs.
-  forceCodeSigning: isMacRelease,
+  // Why: a local build without the fixed identity is unsafe for TCC and must
+  // fail instead of silently producing an unsigned or ad-hoc app.
+  forceCodeSigning: isMacRelease || isMacLocal,
   dmg: {
     artifactName: 'orca-kyle-macos-${arch}.${ext}'
   },
@@ -532,17 +558,21 @@ async function signMacComputerUseHelper(helperAppPath, packager) {
     isMacRelease && process.env.CSC_LINK && packager?.codeSigningInfo?.value
       ? await packager.codeSigningInfo.value
       : null
-  const identity =
-    process.env.ORCA_COMPUTER_MACOS_SIGN_IDENTITY ??
-    process.env.CSC_NAME ??
-    findInstalledMacSigningIdentity(codeSigningInfo?.keychainFile) ??
-    (isMacRelease ? null : '-')
+  const localMacSigning = getLocalMacSigning()
+  const identity = isMacRelease
+    ? (process.env.ORCA_COMPUTER_MACOS_SIGN_IDENTITY ??
+      process.env.CSC_NAME ??
+      findInstalledMacSigningIdentity(codeSigningInfo?.keychainFile) ??
+      null)
+    : localMacSigning?.identityHash
   if (!identity) {
     throw new Error('Missing signing identity for Orca Kyle Computer Use helper app')
   }
   // Why: TCC grants attach to this nested app's code identity. Sign it before
   // the outer Orca.app is sealed so production builds preserve that identity.
-  execFileSync('codesign', codesignArgs(identity, helperAppPath), { stdio: 'inherit' })
+  execFileSync('codesign', codesignArgs(identity, helperAppPath), {
+    stdio: 'inherit'
+  })
   execFileSync('codesign', ['--verify', '--deep', '--strict', helperAppPath], {
     stdio: 'inherit'
   })
@@ -559,10 +589,12 @@ async function signMacNotificationStatusHelper(helperPath, packager) {
     isMacRelease && process.env.CSC_LINK && packager?.codeSigningInfo?.value
       ? await packager.codeSigningInfo.value
       : null
-  const identity =
-    process.env.CSC_NAME ??
-    findInstalledMacSigningIdentity(codeSigningInfo?.keychainFile) ??
-    (isMacRelease ? null : '-')
+  const localMacSigning = getLocalMacSigning()
+  const identity = isMacRelease
+    ? (process.env.CSC_NAME ??
+      findInstalledMacSigningIdentity(codeSigningInfo?.keychainFile) ??
+      null)
+    : localMacSigning?.identityHash
   if (!identity) {
     throw new Error('Missing signing identity for orca-notification-status helper')
   }
@@ -570,17 +602,32 @@ async function signMacNotificationStatusHelper(helperPath, packager) {
   // binary embeds the app's CFBundleIdentifier in __TEXT,__info_plist so this
   // (and any later) `codesign --force` derives the correct identifier. Sign
   // before the outer Orca.app is sealed, like the computer-use helper.
-  const args = ['--force', '--sign', identity]
+  const args = isMacRelease
+    ? ['--force', '--sign', identity]
+    : localNotificationStatusCodesignArgs(
+        requireIdentityHash(identity),
+        helperPath,
+        localMacSigning?.keychainPath
+      )
   if (isMacRelease) {
     args.push('--options', 'runtime', '--timestamp')
   }
-  args.push(helperPath)
+  args.push(...(isMacRelease ? [helperPath] : []))
   execFileSync('codesign', args, { stdio: 'inherit' })
   execFileSync('codesign', ['--verify', '--strict', helperPath], { stdio: 'inherit' })
 }
 
 function codesignArgs(identity, targetPath) {
-  const args = ['--force', '--deep', '--sign', identity]
+  const localMacSigning = getLocalMacSigning()
+  if (localMacSigning) {
+    return localComputerUseCodesignArgs(
+      requireIdentityHash(localMacSigning.identityHash),
+      targetPath,
+      localMacSigning.keychainPath
+    )
+  }
+  const args = ['--force', '--deep']
+  args.push('--sign', identity)
   if (isMacRelease) {
     args.push(
       '--options',
@@ -592,6 +639,17 @@ function codesignArgs(identity, targetPath) {
   }
   args.push(targetPath)
   return args
+}
+
+function getLocalMacSigning() {
+  if (!isMacLocal) {
+    return null
+  }
+  if (!localMacSigningResolved) {
+    localMacSigning = resolveLocalMacSigningIdentity()
+    localMacSigningResolved = true
+  }
+  return localMacSigning
 }
 
 function findInstalledMacSigningIdentity(keychainFile) {
