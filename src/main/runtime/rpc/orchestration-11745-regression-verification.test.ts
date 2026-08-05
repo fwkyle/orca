@@ -307,7 +307,7 @@ describe('#11745 H1 — is --from an authenticated identity?', () => {
     expect(harness.db.listGates({ taskId: victimTask.id })).toHaveLength(0)
   })
 
-  it('refuses the same spoof against taskCreate, which predates this change', async () => {
+  it('creates an inbox card without trusting a spoofed caller handle', async () => {
     const harness = createHarness()
     const runA = bindRunA(harness)
 
@@ -320,8 +320,17 @@ describe('#11745 H1 — is --from an authenticated identity?', () => {
       )
     )
 
-    // Why: the weakness was inherited from this older path, so the fix has to cover it too.
-    expect(response).toMatchObject({ ok: false, error: { code: 'consumer_fenced' } })
+    expect(response).toMatchObject({
+      ok: true,
+      result: {
+        task: {
+          run_id: null,
+          assignment_state: 'inbox',
+          spec: 'spoofed assignment'
+        }
+      }
+    })
+    expect(harness.db.listTasks({ assignmentState: 'inbox' })).toHaveLength(1)
     expect(harness.db.listTasks({ runId: runA })).toHaveLength(0)
   })
 
@@ -385,7 +394,7 @@ describe('#11745 H1 — is --from an authenticated identity?', () => {
     expect(response).toMatchObject({ ok: false, error: { code: 'consumer_fenced' } })
   })
 
-  it('does not let legacy authority bypass a mismatched declared handle', async () => {
+  it('keeps a mismatched declared handle in the inbox without legacy authority', async () => {
     const harness = createHarness()
     const before = adoptedGraph(harness)
 
@@ -401,8 +410,23 @@ describe('#11745 H1 — is --from an authenticated identity?', () => {
       )
     )
 
-    expect(response).toMatchObject({ ok: false, error: { code: 'consumer_fenced' } })
-    expect(adoptedGraph(harness)).toEqual(before)
+    expect(response).toMatchObject({
+      ok: true,
+      result: {
+        task: {
+          run_id: null,
+          assignment_state: 'inbox',
+          spec: 'spoofed legacy assignment'
+        }
+      }
+    })
+    expect(adoptedGraph(harness)).toMatchObject({
+      ...before,
+      tables: {
+        ...before.tables,
+        mutation_receipts: before.tables.mutation_receipts + 1
+      }
+    })
   })
 })
 
@@ -433,7 +457,7 @@ describe('#11745 H1 — gateList read posture', () => {
 })
 
 describe('#11745 H2 — revoked principal on an unclaimed adopted Run', () => {
-  it('answers an unbound caller with run_required, not legacy_read_only', async () => {
+  it('creates an inbox card for an unbound caller without touching the adopted Run', async () => {
     const harness = createHarness()
     await legacyClaimsAdoptedRun(harness, 'v-h2')
     await currentCoordinatorTakesOver(harness, 'v-h2')
@@ -447,19 +471,26 @@ describe('#11745 H2 — revoked principal on an unclaimed adopted Run', () => {
     expect(harness.db.getLegacyCoordinatorPrincipal(harness.adoptedRunId)?.status).toBe('revoked')
     const before = adoptedGraph(harness)
 
-    const response = (await harness.dispatcher.dispatch(
+    const response = await harness.dispatcher.dispatch(
       request(
         'orchestration.taskCreate',
         { spec: 'unbound assignment', callerTerminalHandle: OUTSIDER_HANDLE },
         currentEvidence('worker'),
         'v-h2-unbound'
       )
-    )) as { ok: false; error: { code: string } }
+    )
 
-    expect(response.ok).toBe(false)
-    expect(response.error.code).not.toBe('legacy_read_only')
-    expect(response.error.code).toBe('run_required')
-    expect(adoptedGraph(harness)).toEqual(before)
+    expect(response).toMatchObject({
+      ok: true,
+      result: { task: { run_id: null, assignment_state: 'inbox', spec: 'unbound assignment' } }
+    })
+    expect(adoptedGraph(harness)).toMatchObject({
+      ...before,
+      tables: {
+        ...before.tables,
+        mutation_receipts: before.tables.mutation_receipts + 1
+      }
+    })
   })
 
   it('gives the SAME honest code through the gate path', async () => {
@@ -489,25 +520,32 @@ describe('#11745 H2 — revoked principal on an unclaimed adopted Run', () => {
 })
 
 describe('#11745 H3 — adopted Run claimed by the legacy coordinator', () => {
-  it('answers an unrelated unbound caller with run_required, not legacy_read_only', async () => {
+  it('creates an inbox card for an unrelated caller without touching the adopted Run', async () => {
     const harness = createHarness()
     await legacyClaimsAdoptedRun(harness, 'v-h3')
     expect(harness.db.getLegacyCoordinatorPrincipal(harness.adoptedRunId)?.status).toBe('committed')
     const before = adoptedGraph(harness)
 
-    const response = (await harness.dispatcher.dispatch(
+    const response = await harness.dispatcher.dispatch(
       request(
         'orchestration.taskCreate',
         { spec: 'fresh assignment', callerTerminalHandle: OUTSIDER_HANDLE },
         currentEvidence('worker'),
         'v-h3-unbound'
       )
-    )) as { ok: false; error: { code: string } }
+    )
 
-    expect(response.ok).toBe(false)
-    expect(response.error.code).not.toBe('legacy_read_only')
-    expect(response.error.code).toBe('run_required')
-    expect(adoptedGraph(harness)).toEqual(before)
+    expect(response).toMatchObject({
+      ok: true,
+      result: { task: { run_id: null, assignment_state: 'inbox', spec: 'fresh assignment' } }
+    })
+    expect(adoptedGraph(harness)).toMatchObject({
+      ...before,
+      tables: {
+        ...before.tables,
+        mutation_receipts: before.tables.mutation_receipts + 1
+      }
+    })
   })
 
   it('still fences the genuinely stale legacy coordinator with legacy_read_only and zero effects', async () => {

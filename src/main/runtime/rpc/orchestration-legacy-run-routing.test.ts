@@ -17,7 +17,7 @@ afterEach(() => {
 
 describe('legacy coordinator gate run routing', () => {
   it.each(['dispatch', 'websocket'] as const)(
-    '%s asks an unbound caller to bind a Run instead of fencing it as a legacy coordinator',
+    '%s creates an inbox card for an unbound caller instead of routing to a legacy Run',
     async (transport) => {
       const harness = createHarness()
 
@@ -36,14 +36,17 @@ describe('legacy coordinator gate run routing', () => {
       )
 
       expect(response).toMatchObject({
-        ok: false,
-        error: { code: 'run_required' }
+        ok: true,
+        result: {
+          task: { run_id: null, assignment_state: 'inbox', spec: 'fresh assignment' }
+        }
       })
+      expect(harness.db.listTasks({ assignmentState: 'inbox' })).toHaveLength(1)
       expect(harness.db.listTasks({ runId: harness.adoptedRunId })).toHaveLength(1)
     }
   )
 
-  it('routes an unnamed Run to the caller binding even when attestation fails', async () => {
+  it('keeps an inbox card unassigned even when attestation fails', async () => {
     const harness = createHarness()
     const run = harness.db.createRun({
       objective: 'current work',
@@ -65,8 +68,10 @@ describe('legacy coordinator gate run routing', () => {
 
     expect(response).toMatchObject({
       ok: true,
-      result: { task: { run_id: run.id, spec: 'fresh assignment' } }
+      result: { task: { run_id: null, assignment_state: 'inbox', spec: 'fresh assignment' } }
     })
+    expect(harness.db.listTasks({ runId: run.id })).toHaveLength(0)
+    expect(harness.db.listTasks({ assignmentState: 'inbox' })).toHaveLength(1)
   })
 
   it('lets a current coordinator rebind the unclaimed adopted Run with actionable guidance', async () => {
@@ -92,7 +97,7 @@ describe('legacy coordinator gate run routing', () => {
     })
   })
 
-  it('still routes the retained legacy coordinator to the adopted Run without --run', async () => {
+  it('keeps a retained legacy coordinator task in the inbox without --run', async () => {
     const harness = createHarness()
 
     const response = await harness.dispatcher.dispatch(
@@ -110,9 +115,38 @@ describe('legacy coordinator gate run routing', () => {
     expect(response).toMatchObject({
       ok: true,
       result: {
-        task: { run_id: harness.adoptedRunId, spec: 'retained assignment' }
+        task: { run_id: null, assignment_state: 'inbox', spec: 'retained assignment' }
       }
     })
+    expect(harness.db.listTasks({ runId: harness.adoptedRunId })).toHaveLength(1)
+    expect(harness.db.listTasks({ assignmentState: 'inbox' })).toHaveLength(1)
+  })
+
+  it('keeps a current coordinator task in the inbox when a current Run is bound but --run is omitted', async () => {
+    const harness = createHarness()
+    const run = harness.db.createRun({
+      objective: 'current work',
+      coordinatorHandle: CURRENT_COORDINATOR_HANDLE,
+      coordinatorPaneKey: CURRENT_COORDINATOR_PANE
+    })
+
+    const response = await harness.dispatcher.dispatch(
+      request(
+        'orchestration.taskCreate',
+        { spec: 'current inbox assignment', callerTerminalHandle: CURRENT_COORDINATOR_HANDLE },
+        currentEvidence('coordinator'),
+        'current-inbox-task-create'
+      )
+    )
+
+    expect(response).toMatchObject({
+      ok: true,
+      result: {
+        task: { run_id: null, assignment_state: 'inbox', spec: 'current inbox assignment' }
+      }
+    })
+    expect(harness.db.listTasks({ runId: run.id })).toHaveLength(0)
+    expect(harness.db.listTasks({ assignmentState: 'inbox' })).toHaveLength(1)
   })
 
   it('still fences a stale legacy coordinator once the adopted Run is claimed', async () => {

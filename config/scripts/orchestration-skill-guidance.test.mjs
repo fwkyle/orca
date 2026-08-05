@@ -30,7 +30,9 @@ describe('orchestration skill guidance', () => {
     const toolBoundary = getSection(skill, 'Tool Boundary')
 
     expect(toolBoundary).toContain('must create or bind a Run')
-    expect(toolBoundary).toContain('create the Task with `orca orchestration task-create`')
+    expect(toolBoundary).toContain(
+      'create the Task with `orca orchestration task-create --run <run_id>`'
+    )
     expect(toolBoundary).toContain('preferred `orca orchestration worker-start` composition')
     expect(toolBoundary).toContain('low-level `orca orchestration dispatch --inject` path')
     expect(toolBoundary).not.toContain('or `orca orchestration run`')

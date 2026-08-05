@@ -49,7 +49,7 @@ async function takeoverAdoptedRun(harness: LegacyCompatibilityDispatcherHarness)
 }
 
 describe('legacy coordinator fence jurisdiction', () => {
-  it('declines jurisdiction over an unbound stranger while the adopted Run is claimed', async () => {
+  it('keeps an inbox card outside a claimed adopted Run', async () => {
     const harness = createHarness()
     await claimAdoptedRunAsLegacyCoordinator(harness)
 
@@ -62,8 +62,35 @@ describe('legacy coordinator fence jurisdiction', () => {
       )
     )
 
-    expect(response).toMatchObject({ ok: false, error: { code: 'run_required' } })
+    expect(response).toMatchObject({
+      ok: true,
+      result: { task: { run_id: null, assignment_state: 'inbox', spec: 'fresh assignment' } }
+    })
+    expect(harness.db.listTasks({ assignmentState: 'inbox' })).toHaveLength(1)
     expect(harness.db.listTasks({ runId: harness.adoptedRunId })).toHaveLength(1)
+  })
+
+  it('keeps the claimed legacy coordinator task in the inbox when --run is omitted', async () => {
+    const harness = createHarness()
+    await claimAdoptedRunAsLegacyCoordinator(harness)
+
+    const response = await harness.dispatcher.dispatch(
+      request(
+        'orchestration.taskCreate',
+        { spec: 'claimed inbox assignment', callerTerminalHandle: COORDINATOR_HANDLE },
+        evidence('coordinator'),
+        'claimed-legacy-inbox-task-create'
+      )
+    )
+
+    expect(response).toMatchObject({
+      ok: true,
+      result: {
+        task: { run_id: null, assignment_state: 'inbox', spec: 'claimed inbox assignment' }
+      }
+    })
+    expect(harness.db.listTasks({ runId: harness.adoptedRunId })).toHaveLength(1)
+    expect(harness.db.listTasks({ assignmentState: 'inbox' })).toHaveLength(1)
   })
 
   it('releases the fence once the adopted Run is unclaimed and its principal is revoked', async () => {
@@ -79,7 +106,7 @@ describe('legacy coordinator fence jurisdiction', () => {
     expect(elsewhere.id).not.toBe(harness.adoptedRunId)
     expect(harness.db.getRun(harness.adoptedRunId)?.coordinator_pane_key).toBeNull()
 
-    const fenced = await harness.dispatcher.dispatch(
+    const inbox = await harness.dispatcher.dispatch(
       request(
         'orchestration.taskCreate',
         { spec: 'unclaimed assignment', callerTerminalHandle: COORDINATOR_HANDLE },
@@ -87,7 +114,13 @@ describe('legacy coordinator fence jurisdiction', () => {
         'unclaimed-revoked-task-create'
       )
     )
-    expect(fenced).toMatchObject({ ok: false, error: { code: 'run_required' } })
+    expect(inbox).toMatchObject({
+      ok: true,
+      result: {
+        task: { run_id: null, assignment_state: 'inbox', spec: 'unclaimed assignment' }
+      }
+    })
+    expect(harness.db.listTasks({ assignmentState: 'inbox' })).toHaveLength(1)
 
     const reclaim = await harness.dispatcher.dispatch(
       request(

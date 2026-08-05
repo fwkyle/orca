@@ -65,6 +65,10 @@ export class OrchestrationLegacyCompatibility {
       return { handled: false }
     }
     const values = params as Record<string, unknown>
+    // Why: taskCreate without --run is an inbox write; compatibility must not invent a Run.
+    if (request.method === 'orchestration.taskCreate' && stringValue(values.run) === undefined) {
+      return { handled: false }
+    }
     if (CURRENT_AUTHORITY_PREFLIGHT_METHODS.has(request.method)) {
       const callerAuthority = this.resolveCurrentAuthority(request, values)
       if (callerAuthority) {

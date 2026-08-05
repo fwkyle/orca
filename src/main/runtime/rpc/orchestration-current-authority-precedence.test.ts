@@ -37,6 +37,7 @@ describe('current orchestration authority precedence', () => {
           'orchestration.taskCreate',
           {
             spec: 'current assignment',
+            run: run.id,
             callerTerminalHandle: CURRENT_COORDINATOR_HANDLE
           },
           currentEvidence('coordinator'),
@@ -49,7 +50,7 @@ describe('current orchestration authority precedence', () => {
         ok: true,
         result: { task: { run_id: run.id, spec: 'current assignment' } }
       })
-      expect(harness.db.listTasks({ runId: harness.adoptedRunId })).toHaveLength(1)
+      expect(harness.db.listTasks({ runId: run.id })).toHaveLength(1)
     }
   )
 
@@ -64,7 +65,7 @@ describe('current orchestration authority precedence', () => {
     const response = await harness.dispatcher.dispatch(
       request(
         'orchestration.taskCreate',
-        { spec: 'current assignment', callerTerminalHandle: COORDINATOR_HANDLE },
+        { spec: 'current assignment', run: run.id, callerTerminalHandle: COORDINATOR_HANDLE },
         evidence('coordinator'),
         'retained-terminal-current-run'
       )
@@ -109,7 +110,11 @@ describe('current orchestration authority precedence', () => {
     const response = await harness.dispatcher.dispatch(
       request(
         'orchestration.taskCreate',
-        { spec: 'legacy follow-up', callerTerminalHandle: COORDINATOR_HANDLE },
+        {
+          spec: 'legacy follow-up',
+          run: harness.adoptedRunId,
+          callerTerminalHandle: COORDINATOR_HANDLE
+        },
         evidence('coordinator'),
         'legacy-task-create'
       )
