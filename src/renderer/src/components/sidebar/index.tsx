@@ -7,6 +7,7 @@ import SidebarNav from './SidebarNav'
 import SetupScriptPromptCard from './SetupScriptPromptCard'
 import WorktreeList from './WorktreeList'
 import SidebarToolbar from './SidebarToolbar'
+import SidebarBuildInfo from './SidebarBuildInfo'
 import WorkspaceKanbanDrawer from './WorkspaceKanbanDrawer'
 import { AgentDashboardDrawer } from '@/components/dashboard/AgentDashboardDrawer'
 import type { VirtualizedScrollAnchor } from '@/hooks/useVirtualizedScrollAnchor'
@@ -159,6 +160,7 @@ function Sidebar({
                 workspaceBoardDragPreviewOpen={workspaceBoardDragPreviewOpen}
                 onWorkspaceBoardToggle={toggleWorkspaceBoard}
               />
+              <SidebarBuildInfo />
             </div>
           </>
         )}

@@ -3965,6 +3965,10 @@
         }
       },
       "sidebar": {
+        "SidebarBuildInfo": {
+          "version": "Version {{value0}}",
+          "localBuild": "Local build · {{value0}} · commit {{value1}}"
+        },
         "local": {
           "base": {
             "ref": {
