@@ -26950,6 +26950,273 @@ describe('OrcaRuntimeService', () => {
     expect(closeTerminal).toHaveBeenCalledWith('laptop-tab')
   })
 
+  it('returns a removed post-check when the surface close lookup races PTY retirement', async () => {
+    const spawn = vi.fn().mockResolvedValue({ id: 'close-race-removed-pty' })
+    let runtime!: OrcaRuntimeService
+    const kill = vi.fn((ptyId: string) => {
+      runtime.onPtyExit(ptyId, 0)
+      return true
+    })
+    runtime = new OrcaRuntimeService(store)
+    runtime.setNotifier({ closeTerminal: vi.fn() } as never)
+    runtime.setPtyController({
+      spawn,
+      write: () => true,
+      kill,
+      getForegroundProcess: async () => null
+    })
+
+    const terminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      tabId: 'close-race-removed-tab',
+      leafId: HEADLESS_LEAF_ID
+    })
+    const before = await runtime.listMobileSessionTabs(`id:${TEST_WORKTREE_ID}`)
+    const closeSurface = vi
+      .spyOn(runtime, 'closeMobileSessionTab')
+      .mockRejectedValue(new Error('tab_not_found'))
+    const listAfterClose = vi
+      .spyOn(runtime, 'listMobileSessionTabs')
+      .mockResolvedValue({ ...before, tabs: [] })
+
+    try {
+      await expect(runtime.closeTerminal(terminal.handle)).resolves.toEqual({
+        handle: terminal.handle,
+        tabId: 'close-race-removed-tab',
+        ptyKilled: true,
+        postClose: { state: 'removed', reason: 'tab_not_found' }
+      })
+      expect(closeSurface).toHaveBeenCalledWith(`id:${TEST_WORKTREE_ID}`, 'close-race-removed-tab')
+    } finally {
+      closeSurface.mockRestore()
+      listAfterClose.mockRestore()
+    }
+
+    expect(kill).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns a still-present post-check when tab_not_found hides a live surface', async () => {
+    const spawn = vi.fn().mockResolvedValue({ id: 'close-race-present-pty' })
+    const kill = vi.fn(() => true)
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setNotifier({ closeTerminal: vi.fn() } as never)
+    runtime.setPtyController({
+      spawn,
+      write: () => true,
+      kill,
+      getForegroundProcess: async () => null
+    })
+
+    const terminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      tabId: 'close-race-present-tab',
+      leafId: HEADLESS_LEAF_ID
+    })
+    const before = await runtime.listMobileSessionTabs(`id:${TEST_WORKTREE_ID}`)
+    const closeSurface = vi
+      .spyOn(runtime, 'closeMobileSessionTab')
+      .mockRejectedValue(new Error('tab_not_found'))
+    const listAfterClose = vi.spyOn(runtime, 'listMobileSessionTabs').mockResolvedValue(before)
+
+    try {
+      await expect(runtime.closeTerminal(terminal.handle)).resolves.toEqual({
+        handle: terminal.handle,
+        tabId: 'close-race-present-tab',
+        ptyKilled: true,
+        postClose: { state: 'still-present', reason: 'tab_not_found' }
+      })
+    } finally {
+      closeSurface.mockRestore()
+      listAfterClose.mockRestore()
+    }
+
+    expect(kill).toHaveBeenCalledTimes(1)
+  })
+
+  it('coalesces concurrent close requests for the same handle', async () => {
+    const spawn = vi.fn().mockResolvedValue({ id: 'close-concurrent-pty' })
+    const kill = vi.fn(() => true)
+    const inventoryStarted = makeDeferred()
+    const inventoryRelease = makeDeferred()
+    let holdInventory = false
+    const listProcesses = vi.fn(async () => {
+      if (holdInventory) {
+        inventoryStarted.resolve()
+        await inventoryRelease.promise
+      }
+      return []
+    })
+    const closeTerminal = vi.fn()
+    const runtime = new OrcaRuntimeService(store)
+    runtime.setNotifier({ closeTerminal } as never)
+    runtime.setPtyController({
+      spawn,
+      write: () => true,
+      kill,
+      getForegroundProcess: async () => null,
+      listProcesses
+    })
+
+    const terminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      tabId: 'close-concurrent-tab',
+      leafId: HEADLESS_LEAF_ID
+    })
+    holdInventory = true
+    const first = runtime.closeTerminal(terminal.handle)
+    await inventoryStarted.promise
+    const second = runtime.closeTerminal(terminal.handle)
+    inventoryRelease.resolve()
+
+    const [firstResult, secondResult] = await Promise.all([first, second])
+    expect(secondResult).toEqual(firstResult)
+    expect(kill).toHaveBeenCalledTimes(1)
+    expect(closeTerminal).toHaveBeenCalledTimes(1)
+  })
+
+  it('coalesces duplicate tab closes and pane/tab competition for a split handle', async () => {
+    const { runtimeStore } = makeRuntimeStoreWithWorkspaceSession(
+      makeWorkspaceSessionWithHeadlessTerminal({
+        terminalLayoutsByTabId: {
+          'host-tab': makeHeadlessTerminalLayout({
+            [HEADLESS_LEAF_ID]: 'persisted-pty',
+            [HEADLESS_SECOND_LEAF_ID]: 'persisted-pty-2'
+          })
+        }
+      })
+    )
+    const acknowledged = makeDeferred()
+    const runtime = new OrcaRuntimeService(runtimeStore as never)
+    runtime.setPtyController({
+      write: () => true,
+      kill: () => true,
+      getForegroundProcess: async () => null,
+      listProcesses: async () => []
+    })
+    runtime.syncWindowGraph(1, {
+      tabs: [
+        {
+          tabId: 'host-tab',
+          worktreeId: TEST_WORKTREE_ID,
+          title: 'Split',
+          activeLeafId: HEADLESS_LEAF_ID,
+          layout: null
+        }
+      ],
+      leaves: [
+        {
+          tabId: 'host-tab',
+          worktreeId: TEST_WORKTREE_ID,
+          leafId: HEADLESS_LEAF_ID,
+          paneRuntimeId: 1,
+          ptyId: 'persisted-pty'
+        },
+        {
+          tabId: 'host-tab',
+          worktreeId: TEST_WORKTREE_ID,
+          leafId: HEADLESS_SECOND_LEAF_ID,
+          paneRuntimeId: 2,
+          ptyId: 'persisted-pty-2'
+        }
+      ]
+    })
+    const [terminal] = (await runtime.listTerminals()).terminals
+    const closeSurface = vi.spyOn(runtime, 'closeMobileSessionTab').mockImplementation(async () => {
+      await acknowledged.promise
+      return { closed: true }
+    })
+
+    const first = runtime.closeTerminalTab(terminal.handle)
+    await vi.waitFor(() => expect(closeSurface).toHaveBeenCalledTimes(1))
+    const second = runtime.closeTerminalTab(terminal.handle)
+    const competingPaneClose = runtime.closeTerminal(terminal.handle)
+
+    expect(closeSurface).toHaveBeenCalledTimes(1)
+    acknowledged.resolve()
+
+    const [firstResult, secondResult, competingResult] = await Promise.all([
+      first,
+      second,
+      competingPaneClose
+    ])
+    expect(secondResult).toEqual(firstResult)
+    expect(competingResult).toEqual(firstResult)
+    expect(firstResult).toMatchObject({
+      handle: terminal.handle,
+      tabId: 'host-tab',
+      closeMode: 'tab',
+      ptyKilled: false
+    })
+    expect(closeSurface).toHaveBeenCalledTimes(1)
+  })
+
+  it('escalates a pane close when a tab close arrives second', async () => {
+    const { runtimeStore, getSession } = makeRuntimeStoreWithWorkspaceSession(
+      makeWorkspaceSessionWithHeadlessTerminal({
+        tabsByWorktree: {
+          [TEST_WORKTREE_ID]: [
+            {
+              id: 'reverse-close-tab',
+              ptyId: null,
+              worktreeId: TEST_WORKTREE_ID,
+              title: 'Reverse close',
+              customTitle: null,
+              color: null,
+              sortOrder: 0,
+              createdAt: 1
+            }
+          ]
+        },
+        terminalLayoutsByTabId: {
+          'reverse-close-tab': makeHeadlessTerminalLayout({ [HEADLESS_LEAF_ID]: undefined })
+        }
+      })
+    )
+    const flushOrThrow = vi.fn()
+    const spawn = vi
+      .fn()
+      .mockResolvedValueOnce({ id: 'reverse-close-left' })
+      .mockResolvedValueOnce({ id: 'reverse-close-right' })
+    let runtime!: OrcaRuntimeService
+    const kill = vi.fn((ptyId: string) => {
+      runtime.onPtyExit(ptyId, 0)
+      return true
+    })
+    runtime = new OrcaRuntimeService({ ...runtimeStore, flushOrThrow } as never)
+    runtime.setPtyController({
+      spawn,
+      write: () => true,
+      kill,
+      getForegroundProcess: async () => null
+    })
+    runtime.syncWindowGraph(0, { tabs: [], leaves: [] })
+    const terminal = await runtime.createTerminal(`id:${TEST_WORKTREE_ID}`, {
+      tabId: 'reverse-close-tab',
+      leafId: HEADLESS_LEAF_ID
+    })
+    await runtime.splitTerminal(terminal.handle, { direction: 'vertical' })
+
+    flushOrThrow.mockClear()
+    const paneClose = runtime.closeTerminal(terminal.handle)
+    const tabClose = runtime.closeTerminalTab(terminal.handle)
+    const [paneReceipt, tabReceipt] = await Promise.all([paneClose, tabClose])
+
+    expect(paneReceipt).toEqual({
+      handle: terminal.handle,
+      tabId: 'reverse-close-tab',
+      ptyKilled: true
+    })
+    expect(tabReceipt).toEqual({
+      handle: terminal.handle,
+      tabId: 'reverse-close-tab',
+      closeMode: 'tab',
+      ptyKilled: false
+    })
+    expect(getSession().tabsByWorktree[TEST_WORKTREE_ID]).toEqual([])
+    expect(getSession().terminalLayoutsByTabId['reverse-close-tab']).toBeUndefined()
+    expect((await runtime.listMobileSessionTabs(`id:${TEST_WORKTREE_ID}`)).tabs).toEqual([])
+    expect(kill).toHaveBeenCalledWith('reverse-close-left')
+    expect(kill).toHaveBeenCalledWith('reverse-close-right')
+    expect(flushOrThrow).toHaveBeenCalled()
+  })
+
   it('waits for renderer acknowledgement before returning a whole-tab close receipt', async () => {
     const { runtimeStore } = makeRuntimeStoreWithWorkspaceSession(
       makeWorkspaceSessionWithHeadlessTerminal()

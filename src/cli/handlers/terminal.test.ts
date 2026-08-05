@@ -51,6 +51,35 @@ describe('terminal close CLI', () => {
     expect(call).toHaveBeenCalledWith('terminal.closeTab', { terminal: 'term-1' })
   })
 
+  it('returns non-zero when the close post-check finds the tab still present', async () => {
+    const previousExitCode = process.exitCode
+    const call = vi.fn().mockResolvedValue({
+      result: {
+        close: {
+          handle: 'term-1',
+          tabId: 'tab-1',
+          ptyKilled: true,
+          postClose: { state: 'still-present', reason: 'tab_not_found' }
+        }
+      }
+    })
+    vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    try {
+      process.exitCode = 0
+      await TERMINAL_HANDLERS['terminal close']({
+        flags: new Map([['terminal', 'term-1']]),
+        client: { call } as unknown as RuntimeClient,
+        cwd: '/tmp/worktree',
+        json: true
+      })
+
+      expect(process.exitCode).toBe(1)
+    } finally {
+      process.exitCode = previousExitCode
+    }
+  })
+
   it('documents that --tab waits for durable persistence', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {})
 

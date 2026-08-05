@@ -724,12 +724,21 @@ export type RuntimeTerminalFocus = {
   navigated?: boolean
 }
 
+export type RuntimeTerminalClosePostCheck =
+  | { state: 'removed'; reason: 'tab_not_found' }
+  | { state: 'still-present'; reason: 'tab_not_found' }
+
 export type RuntimeTerminalClose = {
   handle: string
   tabId: string
   /** Present for the durable whole-tab lifecycle without changing legacy receipts. */
   closeMode?: 'tab'
   ptyKilled: boolean
+  /**
+   * Present when the close lookup raced PTY retirement. The runtime checks the
+   * exact worktree tab before reporting whether the requested surface is gone.
+   */
+  postClose?: RuntimeTerminalClosePostCheck
 }
 
 export type RuntimeTerminalWaitCondition = 'exit' | 'tui-idle'

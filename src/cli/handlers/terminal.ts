@@ -198,6 +198,10 @@ export const TERMINAL_HANDLERS: Record<string, CommandHandler> = {
       terminal: await getTerminalHandle(flags, cwd, client)
     })
     printResult(result, json, formatTerminalClose)
+    // Why: a tab_not_found response is only successful when the post-check proved removal.
+    if (result.result.close.postClose?.state === 'still-present') {
+      process.exitCode = 1
+    }
   },
   'terminal split': async ({ flags, client, cwd, json }) => {
     const directionFlag = getOptionalStringFlag(flags, 'direction')
