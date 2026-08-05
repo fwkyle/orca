@@ -42,6 +42,11 @@
   - SSH 워크스페이스와 folder workspace를 함께 지원한다. 모든 워크스페이스가 git worktree라고 가정하지 않는다.
 - 검증 기준: 판 종료 전후 (1) 남은 탭 목록이 사용자가 보존 선택한 것과 정확히 일치 (2) 다른 판의 탭·터미널 수 변화 0 (3) folder workspace와 SSH 워크스페이스 각각에서 왕복 1회 (4) 보존 선택한 worktree가 디스크에 그대로 (5) 정리 후 CLI 장부와 UI 탭 목록의 불일치 0건.
 - 이번 범위 밖: UI 구현 자체. 이 항목은 계약과 검증 기준까지만 확정한다.
+- 2026-08-05 improvement-1 판 결과 (Track E, main task `task_2ca1c06ff05f`, 관문 `gate_404bcf8d5e01` = 부분 마감 + 차기 판 이월):
+  - **이번 판에 끝낸 것 — 안전 계약 코드와 테스트만.** 정리 후보를 판 단위 ID로 고정(candidate ID), 사용자에게 보여준 미리보기와 실행 시점 목록이 같은지 확인하는 지문(preview fingerprint), 실행 직전 한 번 더 낡음 여부 재검증(stale 재검증), 그리고 다른 board·다른 workspace·공유 세션(shared session)·null·unknown 소유자는 전부 "정리하지 않음"으로 막는 fail-closed 판정까지다. 안전 계약 checkpoint `96c3caa37`, 독립 최종 검수 `task_59bb3a3b7041` CODE_PASS, 통합 checkpoint `4d8185b4865c61408eeb778960e7dfd9aa898399`.
+  - **실제 정리는 하지 않았다.** 이번 판에서 세션 종료(close/kill), 프로세스 정리(cleanup), 탭·워크스페이스 실삭제는 한 건도 실행하지 않았다. 지금 코드는 "무엇을 지울 수 있는지 판정하는 층"까지만 있다.
+  - **차기 판 후보 (순서 고정):** (1) 사이드바 개수 표시를 실제 후보 계산에 연결 (2) 실행기(production executor) 연결 (3) 아무것도 지우지 않는 미리보기를 실물에서 검증 (4) exact candidate 목록을 kyle에게 그대로 보여준 뒤 **그 시점의 kyle 승인**을 별도로 받는다 (5) 승인 뒤에만 실제 session close/kill/cleanup. 앞 단계 승인은 다음 판으로 이월되지 않는다.
+  - **혼동 금지:** 이 항목은 고아 세션(orphan session) 문제나 roster retire 오보고 결함과 별개 사안이다. 같은 판에서 나왔다는 이유로 묶어 처리하지 않는다.
 
 ## 4. 포크 동기화 리듬 — upstream 미러 / 정기 동기화 랠리 / 즉시 cherry-pick
 
