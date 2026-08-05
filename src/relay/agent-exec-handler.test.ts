@@ -18,6 +18,14 @@ const execFileMock = vi.mocked(execFile)
 
 type AgentExecResult = { exitCode: number | null; timedOut: boolean }
 
+const GIT_CONFIG_PROTOCOL_KEY = /^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/
+
+function inheritedEnvWithoutGitConfigProtocol(): NodeJS.ProcessEnv {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !GIT_CONFIG_PROTOCOL_KEY.test(key))
+  )
+}
+
 describe('AgentExecHandler', () => {
   beforeEach(() => {
     spawnMock.mockReset()
@@ -54,7 +62,7 @@ describe('AgentExecHandler', () => {
     expect(spawnMock).toHaveBeenCalledWith('agent', ['--flag', '42'], {
       cwd: '/repo',
       env: expect.objectContaining({
-        ...process.env,
+        ...inheritedEnvWithoutGitConfigProtocol(),
         GIT_TERMINAL_PROMPT: '0',
         GCM_INTERACTIVE: 'never'
       }),
@@ -93,7 +101,7 @@ describe('AgentExecHandler', () => {
     expect(spawnMock).toHaveBeenCalledWith('codex', ['exec'], {
       cwd: '/repo',
       env: expect.objectContaining({
-        ...process.env,
+        ...inheritedEnvWithoutGitConfigProtocol(),
         CODEX_HOME: '/managed/codex-home',
         PATH: '/managed/bin'
       }),

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { OrcaRuntimeService } from '../../orca-runtime'
 import { OrchestrationDb } from '../../orchestration/db'
+import { reconcileLifecycleMessage } from '../../orchestration/lifecycle-reconciliation'
 import type { RpcMethod } from '../core'
 import { ALL_RPC_METHODS } from './index'
 
@@ -46,15 +47,19 @@ describe('orchestration.rosterRetire', () => {
       lastSeenHandle: 'term_worker_old'
     })
     const task = db.createTask({ spec: 'card 8', runId })
-    db.updateTaskStatus(task.id, 'completed')
-    db.insertMessage({
+    db.updateTaskStatus(task.id, 'ready')
+    const dispatch = db.createDispatchContext(task.id, 'term_worker_old', 'tab_1:leaf_1')
+    const message = db.insertMessage({
       from: 'term_worker_old',
       to: `run:${runId}`,
       subject: 'done',
+      body: 'done',
       type: 'worker_done',
       runId,
-      payload: JSON.stringify({ taskId: task.id })
+      senderPaneKey: 'tab_1:leaf_1',
+      payload: JSON.stringify({ taskId: task.id, dispatchId: dispatch.id, outcome: 'succeeded' })
     })
+    reconcileLifecycleMessage(db, message, () => {})
     return { rosterId: roster.id, taskId: task.id }
   }
 

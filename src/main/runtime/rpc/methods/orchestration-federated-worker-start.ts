@@ -11,6 +11,7 @@ import type { OrcaRuntimeService } from '../../orca-runtime'
 import type { OrchestrationDb } from '../../orchestration/db'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import type { WorkerStartInput } from './orchestration-worker-start-schema'
+import { hasWorkerStartCreationOptions } from './worker-start-argument-validation'
 
 export async function startFederatedWorker(args: {
   params: WorkerStartInput
@@ -226,7 +227,10 @@ type RemoteStartReceipt = {
   lastError?: string
 }
 
-function validateRemoteWorkerStart(params: WorkerStartInput, createsWorktree: boolean): void {
+export function validateRemoteWorkerStart(
+  params: WorkerStartInput,
+  createsWorktree: boolean
+): void {
   if (createsWorktree && (!params.name || !params.repo)) {
     throw new OrchestrationError(
       'invalid_argument',
@@ -239,7 +243,7 @@ function validateRemoteWorkerStart(params: WorkerStartInput, createsWorktree: bo
       '--terminal cannot combine with remote new-worktree creation.'
     )
   }
-  if (!createsWorktree && (params.name || params.repo || params.baseBranch || params.setup)) {
+  if (!createsWorktree && hasWorkerStartCreationOptions(params)) {
     throw new OrchestrationError(
       'invalid_argument',
       'Creation and setup options apply only to remote new-top-level worktrees.'

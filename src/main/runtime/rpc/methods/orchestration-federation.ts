@@ -18,6 +18,7 @@ import {
 } from './orchestration-federation-setup'
 import { FederationAttachStartParams } from './orchestration-federation-start-schema'
 import { failFederatedAttachmentWithReceipt } from './orchestration-federation-start-receipt'
+import { hasWorkerStartCreationOptions } from './worker-start-argument-validation'
 
 export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
   defineMethod({
@@ -49,10 +50,7 @@ export const ORCHESTRATION_FEDERATION_ATTACH_METHODS: RpcMethod[] = [
           '--terminal cannot combine with remote new-worktree creation.'
         )
       }
-      if (
-        !createsWorktree &&
-        (params.name || params.repo || params.baseBranch || params.setup || params.setupSource)
-      ) {
+      if (!createsWorktree && (hasWorkerStartCreationOptions(params) || params.setupSource)) {
         throw new OrchestrationError(
           'invalid_argument',
           'Creation and setup options apply only to remote new-top-level worktrees.'

@@ -9,6 +9,22 @@ type RuntimeWithAgentValidation = {
   validateOrchestrationAgentLauncher(agent: TuiAgent): void
 }
 
+export function hasWorkerStartCreationOptions(
+  params: Pick<
+    WorkerStartParamsType,
+    'name' | 'repo' | 'baseBranch' | 'displayName' | 'comment' | 'setup'
+  >
+): boolean {
+  return Boolean(
+    params.name ||
+    params.repo ||
+    params.baseBranch ||
+    params.displayName ||
+    params.comment ||
+    params.setup
+  )
+}
+
 // Why: the argument-combination rules for worker-start are a pure validation
 // boundary with no side effects; extracting them keeps the handler focused on
 // topology and dispatch orchestration.
@@ -32,7 +48,7 @@ export function validateWorkerStartArguments(
   if (createsWorktree && !params.name) {
     throw new OrchestrationError('invalid_argument', 'New worktrees require --name.')
   }
-  if (!createsWorktree && (params.name || params.repo || params.baseBranch || params.setup)) {
+  if (!createsWorktree && hasWorkerStartCreationOptions(params)) {
     throw new OrchestrationError(
       'invalid_argument',
       'Creation and setup options apply only to new-child or new-top-level worktrees.'
