@@ -10,6 +10,7 @@ import {
   type WorkerTerminalTailArchive
 } from '../../orchestration/worker-output-archive'
 import type { OrcaRuntimeService } from '../../orca-runtime'
+import type { RuntimeTerminalClose } from '../../../../shared/runtime-types'
 import { inspectWorkerTerminal } from './orchestration-worker-observation'
 import { orchestrationTimestampToMs } from './orchestration-worker-output'
 
@@ -19,6 +20,7 @@ export type WorkerReleaseReceipt = {
   reason?: WorkerTerminalRetainedReason
   processAction: 'closed_agent_terminal' | 'closed_exited_terminal' | 'none'
   archive: { source: string | null; status: string | null } | null
+  close?: RuntimeTerminalClose
   recovery?: string
   lastError?: string
 }
@@ -211,8 +213,9 @@ async function completeWorkerTerminalReleaseOnce(
     }
   }
 
+  let close: RuntimeTerminalClose
   try {
-    await runtime.closeTerminal(resource.terminal_handle)
+    close = await runtime.closeTerminal(resource.terminal_handle)
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
     if (/disposed|not connected|unavailable/i.test(reason)) {
@@ -235,6 +238,20 @@ async function completeWorkerTerminalReleaseOnce(
       archive: { source: archiveSource, status: archiveStatus },
       lastError: unknown.release_error ?? reason,
       recovery: `Inspect with: orca orchestration worker-show --dispatch ${dispatchId} --json — then repeat worker-release with the same --retry-request. Never substitute a broad terminal close.`
+    }
+  }
+  if (close.postClose?.state === 'still-present') {
+    const unknown = db.markWorkerTerminalReleaseUnknown(
+      resource.id,
+      'The terminal close completed, but the requested tab is still present.'
+    )
+    return {
+      dispatchId,
+      state: 'release_unknown',
+      processAction: 'none',
+      archive: { source: archiveSource, status: archiveStatus },
+      close,
+      lastError: unknown.release_error ?? 'The requested terminal tab is still present.'
     }
   }
   const released = db.settleWorkerTerminalRelease(resource.id)

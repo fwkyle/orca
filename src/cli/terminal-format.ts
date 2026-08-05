@@ -185,11 +185,18 @@ export function formatTerminalFocus(result: { focus: RuntimeTerminalFocus }): st
 }
 
 export function formatTerminalClose(result: { close: RuntimeTerminalClose }): string {
+  if (result.close.postClose?.state === 'still-present') {
+    return `Terminal ${result.close.handle} still has tab ${result.close.tabId}; close lookup returned tab_not_found.`
+  }
+  const postCloseNote =
+    result.close.postClose?.state === 'removed'
+      ? ' Post-check confirmed the tab was removed after tab_not_found.'
+      : ''
   if (result.close.closeMode === 'tab') {
-    return `Closed terminal tab ${result.close.tabId} (${result.close.handle}).`
+    return `Closed terminal tab ${result.close.tabId} (${result.close.handle}).${postCloseNote}`
   }
   const ptyNote = result.close.ptyKilled ? ' PTY killed.' : ''
-  return `Closed terminal ${result.close.handle}.${ptyNote}`
+  return `Closed terminal ${result.close.handle}.${ptyNote}${postCloseNote}`
 }
 
 export function formatTerminalWait(result: { wait: RuntimeTerminalWait }): string {

@@ -134,6 +134,20 @@ export const ORCHESTRATION_FEDERATION_CONTROL_METHODS: RpcMethod[] = [
       }
       try {
         const close = await runtime.closeTerminal(observation.terminal.handle)
+        if (close.postClose?.state === 'still-present') {
+          const attachment = db.markRemoteAttachmentStopUnknown(
+            params.dispatchId,
+            'The terminal close completed, but the requested tab is still present.'
+          )
+          return {
+            dispatchId: params.dispatchId,
+            state: attachment.state,
+            alreadySettled: false,
+            processAction: 'unknown',
+            close,
+            lastError: attachment.last_error
+          }
+        }
         const attachment = db.settleRemoteAttachmentStop(params.dispatchId)
         return {
           dispatchId: params.dispatchId,

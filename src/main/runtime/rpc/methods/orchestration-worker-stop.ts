@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { syncFederatedDispatch } from '../../orchestration/federation-sync'
+import type { RuntimeTerminalClose } from '../../../../shared/runtime-types'
 import { defineMethod, type RpcMethod } from '../core'
 import { requiredString } from '../schemas'
 import {
@@ -37,6 +38,18 @@ export const ORCHESTRATION_WORKER_STOP_METHODS: RpcMethod[] = [
             30_000,
             { orchestrationRequestId: orchestrationMutation.requestId }
           )) as RemoteStopReceipt
+          if (remote.close?.postClose?.state === 'still-present') {
+            return unknownReceipt(
+              params.dispatch,
+              db.markWorkerStopUnknown(
+                params.dispatch,
+                remote.lastError ??
+                  'The terminal close completed, but the requested tab is still present.'
+              ),
+              'unknown',
+              remote.close
+            )
+          }
           if (remote.state === 'stopped') {
             const worker = db.reconcileFederatedWorkerStop(params.dispatch)
             return {
@@ -63,7 +76,8 @@ export const ORCHESTRATION_WORKER_STOP_METHODS: RpcMethod[] = [
               params.dispatch,
               remote.lastError ?? `The worker server returned ${remote.state}.`
             ),
-            remote.processAction
+            remote.processAction,
+            remote.close
           )
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error)
@@ -100,6 +114,17 @@ export const ORCHESTRATION_WORKER_STOP_METHODS: RpcMethod[] = [
       }
       try {
         const close = await runtime.closeTerminal(handle)
+        if (close.postClose?.state === 'still-present') {
+          return unknownReceipt(
+            params.dispatch,
+            db.markWorkerStopUnknown(
+              params.dispatch,
+              'The terminal close completed, but the requested tab is still present.'
+            ),
+            'unknown',
+            close
+          )
+        }
         const worker = db.settleWorkerStop(params.dispatch)
         runtime.notifyMessageArrived(`dispatch:${params.dispatch}`, 'status')
         return {
@@ -125,7 +150,7 @@ type RemoteStopReceipt = {
   state: string
   alreadySettled: boolean
   processAction: string
-  close?: unknown
+  close?: RuntimeTerminalClose
   lastError?: string | null
 }
 
@@ -136,13 +161,15 @@ function settledReceipt(dispatchId: string, state: string) {
 function unknownReceipt(
   dispatchId: string,
   worker: { state: string; last_error: string | null },
-  processAction: string
+  processAction: string,
+  close?: RuntimeTerminalClose
 ) {
   return {
     dispatchId,
     state: worker.state,
     alreadySettled: false,
     processAction,
-    lastError: worker.last_error
+    lastError: worker.last_error,
+    ...(close ? { close } : {})
   }
 }

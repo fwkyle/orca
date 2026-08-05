@@ -189,6 +189,32 @@ describe('orchestration worker release', () => {
     expect(db.getWorkerDispatch(dispatchId)?.state).toBe('succeeded')
   })
 
+  it('does not release when the close post-check finds the tab still present', async () => {
+    setup()
+    const { dispatchId } = await startSettledWorker('succeeded')
+    vi.mocked(runtime.closeTerminal).mockResolvedValueOnce({
+      handle: 'term_worker',
+      tabId: 'worker-tab',
+      ptyKilled: true,
+      postClose: { state: 'still-present', reason: 'tab_not_found' }
+    } as never)
+
+    const receipt = (await call('orchestration.workerRelease', { dispatch: dispatchId })) as {
+      state: string
+      close?: { postClose?: { state: string } }
+      lastError?: string
+    }
+
+    expect(receipt).toMatchObject({
+      state: 'release_unknown',
+      close: { postClose: { state: 'still-present' } },
+      lastError: expect.stringContaining('still present')
+    })
+    expect(db.getWorkerTerminalResourceByOwner(dispatchId)?.release_state).toBe('unknown')
+    expect(db.getWorkerTerminalResourceByOwner(dispatchId)?.ownership_state).toBe('owned')
+    expect(db.getWorkerDispatch(dispatchId)?.state).toBe('succeeded')
+  })
+
   it('releases a failed worker the same way', async () => {
     setup()
     const { dispatchId } = await startSettledWorker('failed')

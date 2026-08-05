@@ -21,11 +21,17 @@ export function withTerminalCloseAttribution(
       span.setAttribute('decision', 'allowed')
       try {
         const result = await close()
-        span.setAttribute('outcome', 'succeeded')
+        span.setAttribute(
+          'outcome',
+          result.postClose?.state === 'still-present' ? 'failed' : 'succeeded'
+        )
         span.setAttribute('tabId', result.tabId)
         span.setAttribute('ptyKilled', result.ptyKilled)
         if (result.closeMode) {
           span.setAttribute('closeMode', result.closeMode)
+        }
+        if (result.postClose) {
+          span.setAttribute('postCloseState', result.postClose.state)
         }
         return result
       } catch (error) {

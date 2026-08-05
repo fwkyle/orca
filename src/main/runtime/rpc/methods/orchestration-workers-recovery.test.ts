@@ -104,6 +104,27 @@ describe('orchestration worker recovery', () => {
     expect(db.getTask(task.id)?.status).toBe('blocked')
   })
 
+  it('keeps worker-stop unknown when the close post-check finds the tab still present', async () => {
+    const { task, dispatch } = createWorker(runtime.getRuntimeId(), false)
+    vi.mocked(runtime.closeTerminal).mockResolvedValueOnce({
+      handle: 'term_worker',
+      tabId: 'worker-tab',
+      ptyKilled: true,
+      postClose: { state: 'still-present', reason: 'tab_not_found' }
+    } as never)
+
+    await expect(
+      call('orchestration.workerStop', { dispatch: dispatch.id })
+    ).resolves.toMatchObject({
+      state: 'stop_unknown',
+      processAction: 'unknown',
+      close: { postClose: { state: 'still-present' } },
+      lastError: expect.stringContaining('still present')
+    })
+    expect(db.getWorkerDispatch(dispatch.id)?.state).toBe('stop_unknown')
+    expect(db.getTask(task.id)?.status).toBe('blocked')
+  })
+
   it('does not adopt or stop a same-looking pane with a new process incarnation', async () => {
     const { task, dispatch } = createWorker()
     vi.mocked(runtime.getTerminalProcessIncarnation).mockReturnValue('runtime:pty:2')

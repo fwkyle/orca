@@ -286,6 +286,7 @@ import {
   type RuntimeTerminalSplit,
   type RuntimeTerminalFocus,
   type RuntimeTerminalClose,
+  type RuntimeTerminalClosePostCheck,
   type RuntimeTerminalListResult,
   type RuntimeTerminalOrphanAdoptionRequest,
   type RuntimeTerminalOrphanAdoptionResult,
@@ -2741,6 +2742,11 @@ export class OrcaRuntimeService {
   private readonly terminalCreateIdempotency = new RemoteRuntimeTerminalCreateIdempotency()
   // Why: concurrent clients sleeping one host workspace must share one physical teardown.
   private terminalSleepByWorktreeId = new Map<string, Promise<RuntimeWorktreeTerminalSleepResult>>()
+  // Why: a tab close must be able to promote an in-flight pane close.
+  private terminalCloseByHandle = new Map<
+    string,
+    { intent: 'pane' | 'tab'; promise: Promise<RuntimeTerminalClose> }
+  >()
   private terminalMutationTailByWorktreeId = new Map<string, Promise<void>>()
   private terminalSleepStateByWorktreeId = new Map<
     string,
@@ -26214,6 +26220,60 @@ export class OrcaRuntimeService {
   }
 
   async closeTerminal(handle: string): Promise<RuntimeTerminalClose> {
+    return this.closeTerminalWithInFlight(handle, 'pane', () => this.closeTerminalOnce(handle))
+  }
+
+  private async closeTerminalWithInFlight(
+    handle: string,
+    intent: 'pane' | 'tab',
+    close: () => Promise<RuntimeTerminalClose>
+  ): Promise<RuntimeTerminalClose> {
+    const existing = this.terminalCloseByHandle.get(handle)
+    if (existing) {
+      if (intent === 'tab' && existing.intent === 'pane' && this.canPromoteCloseToTab(handle)) {
+        const promoted = existing.promise.then(
+          () => this.closeTerminalTabOnce(handle),
+          () => this.closeTerminalTabOnce(handle)
+        )
+        this.trackTerminalClose(handle, 'tab', promoted)
+        return await promoted
+      }
+      return await existing.promise
+    }
+    const closing = close()
+    this.trackTerminalClose(handle, intent, closing)
+    return await closing
+  }
+
+  private trackTerminalClose(
+    handle: string,
+    intent: 'pane' | 'tab',
+    promise: Promise<RuntimeTerminalClose>
+  ): void {
+    const operation = { intent, promise }
+    this.terminalCloseByHandle.set(handle, operation)
+    const clear = (): void => {
+      if (this.terminalCloseByHandle.get(handle) === operation) {
+        this.terminalCloseByHandle.delete(handle)
+      }
+    }
+    void promise.then(clear, clear)
+  }
+
+  private canPromoteCloseToTab(handle: string): boolean {
+    const pty = this.getLivePtyForHandle(handle)
+    if (pty) {
+      return Boolean(pty.pty.tabId)
+    }
+    try {
+      this.getLiveLeafForHandle(handle)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private async closeTerminalOnce(handle: string): Promise<RuntimeTerminalClose> {
     const pty = this.getLivePtyForHandle(handle)
     this.claudeAgentTeams.removeTeamForLeaderHandle(handle)
     if (pty) {
@@ -26228,22 +26288,28 @@ export class OrcaRuntimeService {
         ? countTerminalLayoutLeaves(surface.tab.parentLayout.root)
         : this.countLeavesInTab(tabId)
       const ptyKilled = this.ptyController?.kill(pty.pty.ptyId) ?? false
+      let postClose: RuntimeTerminalClosePostCheck | undefined
       if (!ptyKilled || siblingCount <= 1) {
         if (surface) {
           // Why: paired viewers keep ended streams mounted until the HUB publishes removal, so explicit close uses the durable host-tab transaction instead of viewer-local exit handling.
           try {
             await this.closeMobileSessionTab(`id:${pty.pty.worktreeId}`, tabId)
           } catch (error) {
-            if (!(error instanceof Error) || error.message !== 'workspace_session_unavailable') {
+            const errorCode = error instanceof Error ? error.message : null
+            if (errorCode === 'workspace_session_unavailable') {
+              this.notifier?.closeTerminal(tabId)
+            } else if (errorCode === 'tab_not_found') {
+              // Why: kill can retire the surface before closeMobileSessionTab re-reads it; report the exact post-kill state instead of leaking a false failure.
+              postClose = await this.verifyTerminalCloseAfterTabNotFound(pty.pty.worktreeId, tabId)
+            } else {
               throw error
             }
-            this.notifier?.closeTerminal(tabId)
           }
         } else {
           this.notifier?.closeTerminal(tabId)
         }
       }
-      return { handle, tabId, ptyKilled }
+      return { handle, tabId, ptyKilled, ...(postClose ? { postClose } : {}) }
     }
     this.assertGraphReady()
     const { leaf } = this.getLiveLeafForHandle(handle)
@@ -26259,12 +26325,29 @@ export class OrcaRuntimeService {
     return { handle, tabId: leaf.tabId, ptyKilled }
   }
 
+  private async verifyTerminalCloseAfterTabNotFound(
+    worktreeId: string,
+    tabId: string
+  ): Promise<RuntimeTerminalClosePostCheck> {
+    const snapshot = await this.listMobileSessionTabs(`id:${worktreeId}`)
+    const stillPresent = snapshot.tabs.some(
+      (candidate) => candidate.type === 'terminal' && candidate.parentTabId === tabId
+    )
+    return stillPresent
+      ? { state: 'still-present', reason: 'tab_not_found' }
+      : { state: 'removed', reason: 'tab_not_found' }
+  }
+
   async closeTerminalTab(handle: string): Promise<RuntimeTerminalClose> {
+    return this.closeTerminalWithInFlight(handle, 'tab', () => this.closeTerminalTabOnce(handle))
+  }
+
+  private async closeTerminalTabOnce(handle: string): Promise<RuntimeTerminalClose> {
     const pty = this.getLivePtyForHandle(handle)
     if (pty) {
       const tabId = pty.pty.tabId
       if (!tabId) {
-        return this.closeTerminal(handle)
+        return this.closeTerminalOnce(handle)
       }
       // Why: a handle-addressed CLI/automation close is an explicit intent, so
       // it must stay destructive under the non-user close adjudication gate.

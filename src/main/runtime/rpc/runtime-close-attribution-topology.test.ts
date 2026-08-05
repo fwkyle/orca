@@ -208,4 +208,38 @@ describe('runtime close attribution topology', () => {
     expect(closeTerminal).toHaveBeenCalledTimes(2)
     expect(listSessions).not.toHaveBeenCalled()
   })
+
+  it('records a still-present post-check as a failed close outcome', async () => {
+    const runtime = {
+      getRuntimeId: () => 'runtime-owner-4',
+      closeTerminal: vi.fn().mockResolvedValue({
+        handle: 'terminal-live',
+        tabId: 'tab-live',
+        ptyKilled: true,
+        postClose: { state: 'still-present', reason: 'tab_not_found' }
+      })
+    } as unknown as OrcaRuntimeService
+    const dispatcher = new RpcDispatcher({ runtime, methods: TERMINAL_METHODS })
+
+    await dispatcher.dispatchStreaming(
+      request('terminal-still-present-request', 'terminal.close', {
+        terminal: 'terminal-live'
+      }),
+      vi.fn(),
+      {
+        clientKind: 'runtime',
+        pairedDeviceId: 'device-terminal',
+        connectionId: 'connection-terminal'
+      }
+    )
+
+    expect(records[0]).toMatchObject({
+      attributes: {
+        terminal: 'terminal-live',
+        outcome: 'failed',
+        postCloseState: 'still-present'
+      },
+      exit: { _tag: 'Success' }
+    })
+  })
 })

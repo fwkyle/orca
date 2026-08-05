@@ -178,6 +178,40 @@ describe('orchestration federation control mail', () => {
     expect(homeDb.listPendingFederationRelay(dispatchId, 'to_worker')).toHaveLength(0)
   })
 
+  it('keeps federation stop unknown when the close post-check finds the tab still present', async () => {
+    vi.spyOn(workerRuntime, 'showTerminal').mockResolvedValue({
+      handle: 'term_worker',
+      worktreeId: 'repo::worker',
+      status: 'running'
+    } as never)
+    vi.spyOn(workerRuntime, 'closeTerminal').mockResolvedValue({
+      handle: 'term_worker',
+      tabId: 'worker-tab',
+      ptyKilled: true,
+      postClose: { state: 'still-present', reason: 'tab_not_found' }
+    } as never)
+
+    const stopped = await workerDispatcher.dispatch({
+      id: 'remote-stop-still-present',
+      authToken: homeToken,
+      orchestrationContractVersion: ORCHESTRATION_CONTRACT_VERSION,
+      orchestrationRequestId: 'remote-stop-still-present-request',
+      method: 'orchestration.federationStop',
+      params: { dispatchId }
+    })
+
+    expect(stopped).toMatchObject({
+      ok: true,
+      result: {
+        state: 'stop_unknown',
+        processAction: 'unknown',
+        close: { postClose: { state: 'still-present' } },
+        lastError: expect.stringContaining('still present')
+      }
+    })
+    expect(workerDb.getRemoteDispatchAttachment(dispatchId)?.state).toBe('stop_unknown')
+  })
+
   it('wakes a remote worker waiter when control mail imports', async () => {
     const waiting = workerDispatcher.dispatch(checkRequest('wait-for-control', true))
     await Promise.resolve()
