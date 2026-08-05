@@ -7,6 +7,7 @@ import type {
   MessagePriority,
   MessageDeliveryContract,
   TaskStatus,
+  TaskAssignmentState,
   DispatchStatus,
   GateStatus,
   CoordinatorStatus,
@@ -82,6 +83,7 @@ export type {
   MessagePriority,
   MessageDeliveryContract,
   TaskStatus,
+  TaskAssignmentState,
   DispatchStatus,
   GateStatus,
   CoordinatorStatus,
@@ -273,8 +275,8 @@ type RunListCursor = {
   id: string
 }
 
-// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 role roster, v24 role roster retired status, v25 worker terminal resource backfill (fork: separated from upstream v23 to reach existing v23/v24 DBs).
-const SCHEMA_VERSION = 25
+// Schema versions: v2 'heartbeat'+last_heartbeat_at, v3 delivered_at, v4 task-creator terminal, v5 task_title/display_name, v6 pane identity, v7 lightweight Runs, v8 crash-safe Run deliveries, v9 durable question threads, v10 Dispatch capabilities, v11 durable mutation receipts, v12 composed worker state, v18 post-v6 version-skew repair, v19 adopted legacy Runs and compatibility receipts, v20 legacy question backfill, v21 legacy scheduler-loss provenance, v22 dispatch assignee lookup, v23 role roster, v24 role roster retired status, v25 worker terminal resource backfill (fork: separated from upstream v23 to reach existing v23/v24 DBs), v26 nullable inbox task assignment.
+const SCHEMA_VERSION = 26
 
 function hardenOrchestrationDatabaseFiles(dbPath: string | ':memory:'): void {
   if (dbPath === ':memory:' || process.platform === 'win32') {
@@ -519,7 +521,9 @@ export class OrchestrationDb {
 
       CREATE TABLE IF NOT EXISTS tasks (
         id            TEXT PRIMARY KEY,
-        run_id        TEXT NOT NULL DEFAULT '${LEGACY_RUN_ID}',
+        run_id        TEXT,
+        assignment_state TEXT NOT NULL DEFAULT 'assigned'
+          CHECK(assignment_state IN ('inbox', 'assigned')),
         parent_id     TEXT,
         created_by_terminal_handle TEXT,
         task_title    TEXT,
@@ -1042,6 +1046,53 @@ export class OrchestrationDb {
         // existing v22/v23/v24 DBs and brand-new DBs all get exactly one chance.
         this.backfillWorkerTerminalResources()
       }
+      if (current < 26) {
+        // Why: inbox tasks must not be hidden in a synthetic Run. Rebuild the
+        // table because SQLite cannot drop the old NOT NULL run_id constraint.
+        const hasAssignmentState = this.hasColumn('tasks', 'assignment_state')
+        const assignmentExpression = hasAssignmentState
+          ? "CASE WHEN assignment_state IN ('inbox', 'assigned') THEN assignment_state ELSE 'assigned' END"
+          : "'assigned'"
+        this.db.exec(`
+          CREATE TABLE tasks_inbox_migration (
+            id            TEXT PRIMARY KEY,
+            run_id        TEXT,
+            assignment_state TEXT NOT NULL DEFAULT 'assigned'
+              CHECK(assignment_state IN ('inbox', 'assigned')),
+            parent_id     TEXT,
+            created_by_terminal_handle TEXT,
+            task_title    TEXT,
+            display_name  TEXT,
+            spec          TEXT NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'pending'
+              CHECK(status IN (
+                'pending', 'ready', 'dispatched',
+                'completed', 'failed', 'blocked'
+              )),
+            deps          TEXT NOT NULL DEFAULT '[]',
+            result        TEXT,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            completed_at  TEXT
+          );
+          INSERT INTO tasks_inbox_migration (
+            id, run_id, assignment_state, parent_id, created_by_terminal_handle,
+            task_title, display_name, spec, status, deps, result, created_at, completed_at
+          )
+          SELECT
+            id, run_id, ${assignmentExpression}, parent_id, created_by_terminal_handle,
+            task_title, display_name, spec, status, deps, result, created_at, completed_at
+          FROM tasks;
+          DROP TABLE tasks;
+          ALTER TABLE tasks_inbox_migration RENAME TO tasks;
+          CREATE INDEX idx_tasks_status ON tasks(status);
+          CREATE INDEX idx_tasks_parent ON tasks(parent_id);
+          CREATE INDEX idx_tasks_run_status ON tasks(run_id, status);
+          CREATE INDEX idx_tasks_assignment_state ON tasks(assignment_state, created_at);
+        `)
+      }
+      this.db.exec(
+        'CREATE INDEX IF NOT EXISTS idx_tasks_assignment_state ON tasks(assignment_state, created_at)'
+      )
       this.createUndeliveredInboxIndexIfPossible()
 
       this.db.pragma(`user_version = ${SCHEMA_VERSION}`)
@@ -3836,10 +3887,22 @@ export class OrchestrationDb {
     deps?: string[]
     parentId?: string
     createdByTerminalHandle?: string
-    runId?: string
+    runId?: string | null
+    assignmentState?: TaskAssignmentState
   }): TaskRow {
-    const runId = task.runId ?? LEGACY_RUN_ID
-    this.requireRun(runId)
+    // Undefined remains the direct DB API's legacy default; RPC task-create
+    // passes null when --run is omitted so CLI-created work enters the inbox.
+    const runId = task.runId === undefined ? LEGACY_RUN_ID : task.runId
+    const assignmentState = task.assignmentState ?? (runId === null ? 'inbox' : 'assigned')
+    if ((runId === null) !== (assignmentState === 'inbox')) {
+      throw new Error('Inbox tasks require a NULL run_id and assigned tasks require a Run.')
+    }
+    if (runId === null && ((task.parentId ?? '').length > 0 || (task.deps ?? []).length > 0)) {
+      throw new Error('Inbox tasks cannot declare parents or dependencies before handoff')
+    }
+    if (runId !== null) {
+      this.requireRun(runId)
+    }
     if (task.parentId) {
       const parent = this.getTask(task.parentId)
       if (!parent || parent.run_id !== runId) {
@@ -3863,11 +3926,12 @@ export class OrchestrationDb {
     })
     this.db
       .prepare(
-        'INSERT INTO tasks (id, run_id, parent_id, created_by_terminal_handle, task_title, display_name, spec, status, deps) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO tasks (id, run_id, assignment_state, parent_id, created_by_terminal_handle, task_title, display_name, spec, status, deps) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       )
       .run(
         id,
         runId,
+        assignmentState,
         task.parentId ?? null,
         task.createdByTerminalHandle ?? null,
         display.taskTitle || null,
@@ -3883,25 +3947,40 @@ export class OrchestrationDb {
     return this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRow | undefined
   }
 
-  listTasks(filter?: { status?: TaskStatus; ready?: boolean; runId?: string }): TaskRow[] {
-    const runWhere = filter?.runId ? 'run_id = ? AND ' : ''
-    const runParams: Database.BindValue[] = filter?.runId ? [filter.runId] : []
+  listTasks(filter?: {
+    status?: TaskStatus
+    ready?: boolean
+    runId?: string
+    assignmentState?: TaskAssignmentState
+  }): TaskRow[] {
+    const whereClauses: string[] = []
+    const params: Database.BindValue[] = []
+    if (filter?.runId) {
+      whereClauses.push('run_id = ?')
+      params.push(filter.runId)
+    }
+    if (filter?.assignmentState) {
+      whereClauses.push('assignment_state = ?')
+      params.push(filter.assignmentState)
+    }
+    const where = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : ''
     if (filter?.ready) {
       return this.db
-        .prepare(`SELECT * FROM tasks WHERE ${runWhere}status = 'ready' ORDER BY created_at`)
-        .all(...runParams) as TaskRow[]
+        .prepare(
+          `SELECT * FROM tasks ${where ? `${where} AND` : 'WHERE'} status = 'ready' ORDER BY created_at`
+        )
+        .all(...params) as TaskRow[]
     }
     if (filter?.status) {
       return this.db
-        .prepare(`SELECT * FROM tasks WHERE ${runWhere}status = ? ORDER BY created_at`)
-        .all(...runParams, filter.status) as TaskRow[]
+        .prepare(
+          `SELECT * FROM tasks ${where ? `${where} AND` : 'WHERE'} status = ? ORDER BY created_at`
+        )
+        .all(...params, filter.status) as TaskRow[]
     }
-    if (filter?.runId) {
-      return this.db
-        .prepare('SELECT * FROM tasks WHERE run_id = ? ORDER BY created_at')
-        .all(filter.runId) as TaskRow[]
-    }
-    return this.db.prepare('SELECT * FROM tasks ORDER BY created_at').all() as TaskRow[]
+    return this.db
+      .prepare(`SELECT * FROM tasks ${where} ORDER BY created_at`)
+      .all(...params) as TaskRow[]
   }
 
   // Why: LEFT JOIN keeps non-dispatched tasks (NULL assignee); the MAX(rowid) subquery matches getDispatchContext's most-recent-active-dispatch semantics.
@@ -3909,6 +3988,7 @@ export class OrchestrationDb {
     status?: TaskStatus
     ready?: boolean
     runId?: string
+    assignmentState?: TaskAssignmentState
   }): (TaskRow & {
     assignee_handle: string | null
     dispatch_id: string | null
@@ -3918,6 +3998,10 @@ export class OrchestrationDb {
     if (filter?.runId) {
       whereClauses.push('t.run_id = ?')
       params.push(filter.runId)
+    }
+    if (filter?.assignmentState) {
+      whereClauses.push('t.assignment_state = ?')
+      params.push(filter.assignmentState)
     }
     if (filter?.ready) {
       whereClauses.push("t.status = 'ready'")
@@ -3965,6 +4049,19 @@ export class OrchestrationDb {
       this.completeActiveDispatchForTask(id)
     }
 
+    return this.getTask(id)
+  }
+
+  handoffTask(id: string, runId: string): TaskRow | undefined {
+    this.requireRun(runId)
+    const updated = this.db
+      .prepare(
+        "UPDATE tasks SET run_id = ?, assignment_state = 'assigned' WHERE id = ? AND run_id IS NULL AND assignment_state = 'inbox'"
+      )
+      .run(runId, id)
+    if (updated.changes !== 1) {
+      return undefined
+    }
     return this.getTask(id)
   }
 
@@ -6189,6 +6286,9 @@ export class OrchestrationDb {
     }
     if (task.status !== 'ready') {
       throw new Error(`Task ${taskId} is ${task.status}; only ready tasks can be dispatched`)
+    }
+    if (task.assignment_state !== 'assigned' || task.run_id === null) {
+      throw new Error(`Task ${taskId} is not assigned to a Run and cannot be dispatched`)
     }
 
     // Why: lock on pane identity too, so a reminted handle can't open a second concurrent dispatch on the same pane.

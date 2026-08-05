@@ -108,7 +108,7 @@ describe('orchestration RPC methods', () => {
 
   it('registers all expected methods', () => {
     const registry = buildRegistry(ORCHESTRATION_METHODS)
-    expect(registry.size).toBe(38)
+    expect(registry.size).toBe(39)
     expect(registry.has('orchestration.workerRelease')).toBe(true)
     expect(registry.has('orchestration.workerRetain')).toBe(true)
     expect(registry.has('orchestration.workerList')).toBe(true)
@@ -123,6 +123,7 @@ describe('orchestration RPC methods', () => {
     expect(registry.has('orchestration.reply')).toBe(true)
     expect(registry.has('orchestration.inbox')).toBe(true)
     expect(registry.has('orchestration.taskCreate')).toBe(true)
+    expect(registry.has('orchestration.taskHandoff')).toBe(true)
     expect(registry.has('orchestration.taskList')).toBe(true)
     expect(registry.has('orchestration.taskUpdate')).toBe(true)
     expect(registry.has('orchestration.dispatch')).toBe(true)
@@ -209,23 +210,19 @@ describe('orchestration RPC methods', () => {
       ).rejects.toMatchObject({ code: 'run_not_found' })
     })
 
-    it('requires an explicit binding before task mutation', async () => {
+    it('creates an inbox task without requiring a Run binding', async () => {
       setup(false)
       vi.spyOn(runtime, 'getTerminalPaneKey').mockReturnValue(coordinatorPaneKey)
 
-      await expect(
-        call('orchestration.taskCreate', {
-          spec: 'must not become global',
-          callerTerminalHandle: 'term_coord'
-        })
-      ).rejects.toMatchObject({
-        code: 'run_required',
-        data: {
-          effectsApplied: false,
-          nextCommandArgs: ['skills', 'get', 'orchestration', '--full']
-        }
+      const created = (await call('orchestration.taskCreate', {
+        spec: 'must remain in the official inbox',
+        callerTerminalHandle: 'term_coord'
+      })) as { task: { run_id: string | null; assignment_state: string } }
+
+      expect(created.task).toMatchObject({
+        run_id: null,
+        assignment_state: 'inbox'
       })
-      expect(db.listTasks()).toHaveLength(0)
     })
 
     it('scopes task listing and fences the old coordinator after run-use', async () => {
@@ -1737,6 +1734,19 @@ describe('orchestration RPC methods', () => {
   })
 
   describe('orchestration.taskCreate', () => {
+    it('creates an inbox task when --run is omitted', async () => {
+      setup(false)
+      const result = (await call('orchestration.taskCreate', {
+        spec: 'capture for later handoff'
+      })) as { task: { id: string; run_id: string | null; assignment_state: string } }
+
+      expect(result.task).toMatchObject({ run_id: null, assignment_state: 'inbox' })
+      expect(db.getTask(result.task.id)).toMatchObject({
+        run_id: null,
+        assignment_state: 'inbox'
+      })
+    })
+
     it('creates a task', async () => {
       setup()
       const result = (await call('orchestration.taskCreate', {
@@ -1785,6 +1795,20 @@ describe('orchestration RPC methods', () => {
   })
 
   describe('orchestration.taskList', () => {
+    it('lists inbox tasks without inventing a Run', async () => {
+      setup(false)
+      const inbox = db.createTask({ spec: 'inbox-only', runId: null })
+
+      const result = (await call('orchestration.taskList', {
+        assignmentState: 'inbox'
+      })) as { runId: string | null; tasks: { id: string; assignment_state: string }[] }
+
+      expect(result.runId).toBeNull()
+      expect(result.tasks).toEqual([
+        expect.objectContaining({ id: inbox.id, assignment_state: 'inbox' })
+      ])
+    })
+
     it('lists all tasks', async () => {
       setup()
       db.createTask({ spec: 'a' })
@@ -1854,6 +1878,29 @@ describe('orchestration RPC methods', () => {
       expect(long.spec_truncated).toBe(true)
       expect(short.spec).toBe('Short task')
       expect(short.spec_truncated).toBe(false)
+    })
+  })
+
+  describe('orchestration.taskHandoff', () => {
+    it('links an inbox task to the requested Run without changing its ID', async () => {
+      setup(false)
+      const run = db.createRun({
+        objective: 'handoff destination',
+        coordinatorHandle: 'term_coord',
+        coordinatorPaneKey
+      })
+      const inbox = db.createTask({ spec: 'handoff me', runId: null })
+
+      const result = (await call('orchestration.taskHandoff', {
+        id: inbox.id,
+        run: run.id
+      })) as { task: { id: string; run_id: string; assignment_state: string } }
+
+      expect(result.task).toMatchObject({
+        id: inbox.id,
+        run_id: run.id,
+        assignment_state: 'assigned'
+      })
     })
   })
 

@@ -149,9 +149,15 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
     path: ['orchestration', 'task-list'],
     summary: 'List orchestration tasks',
     usage:
-      'orca orchestration task-list [--status <status>] [--ready] [--brief] [--run <run_id>] [--from <handle>] [--json]',
-    allowedFlags: [...GLOBAL_FLAGS, 'status', 'ready', 'brief', 'run', 'from'],
+      'orca orchestration task-list [--status <status>] [--ready] [--brief] [--inbox] [--run <run_id>] [--from <handle>] [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'status', 'ready', 'brief', 'inbox', 'run', 'from'],
     notes: ['--brief collapses whitespace and caps each spec at 160 characters.']
+  },
+  {
+    path: ['orchestration', 'task-handoff'],
+    summary: 'Hand an inbox task to a Run',
+    usage: 'orca orchestration task-handoff --id <task_id> --run <run_id> [--json]',
+    allowedFlags: [...GLOBAL_FLAGS, 'id', 'run', 'retry-request']
   },
   {
     path: ['orchestration', 'task-update'],

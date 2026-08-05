@@ -22,7 +22,7 @@ Use this skill when coordination state matters. For lightweight terminal prompts
 
 ## Tool Boundary
 
-If a task says to use Orca orchestration, the coordinator must create or bind a Run, create the Task with `orca orchestration task-create`, then attach the worker with either the preferred `orca orchestration worker-start` composition or the low-level `orca orchestration dispatch --inject` path.
+If a task says to use Orca orchestration, the coordinator must create or bind a Run, create the Task with `orca orchestration task-create --run <run_id>`, then attach the worker with either the preferred `orca orchestration worker-start` composition or the low-level `orca orchestration dispatch --inject` path. Omitting `--run` intentionally creates an unassigned inbox card; it never means "use the current Run."
 
 Do not substitute non-Orca subagent tools, generic agent-spawn APIs, or chat-only parallel worker features. Those may create useful workers, but they do not create Orca task/dispatch provenance, injected lifecycle preambles, `worker_done` authority, or decision gates.
 
@@ -101,7 +101,7 @@ Do not launch a replacement editor merely because the desktop app or runtime was
 
 ## Ownership
 
-New orchestration messages and tasks belong to one explicitly bound Run. A Run is only a durable namespace and coordinator inbox; it never schedules or places workers. Lifecycle authority comes from the active Dispatch, and terminal handles remain routing metadata rather than durable identity. Send `worker_done` and `heartbeat` from the worker's own terminal; Orca routes them to that Dispatch's Run.
+New orchestration messages and assigned tasks belong to one explicitly bound Run. An inbox task intentionally has no Run until it is handed off. A Run is only a durable namespace and coordinator inbox; it never schedules or places workers. Lifecycle authority comes from the active Dispatch, and terminal handles remain routing metadata rather than durable identity. Send `worker_done` and `heartbeat` from the worker's own terminal; Orca routes them to that Dispatch's Run.
 
 Classify inherited context before sending lifecycle messages:
 
@@ -155,12 +155,12 @@ Rules:
 
 ## Tasks And Dispatch
 
-A Run is the namespace/inbox, a Task is the work item, and a Dispatch assigns one Task attempt to a terminal. Create or bind a Run once before the common loop.
+A Run is the namespace/inbox, a Task is the work item, and a Dispatch assigns one Task attempt to a terminal. Create or bind a Run once before the common loop. `task-create` without `--run` creates an unassigned inbox card with no Run; every supervised task must pass the explicit Run ID returned by `run-create`.
 
 ```bash
 orca orchestration run-create --objective <text> --json
-orca orchestration task-create --spec <text> [--deps <json_array>] [--parent <task_id>] [--json]
-orca orchestration task-list [--status <status>] [--ready] [--brief] [--json]
+orca orchestration task-create --spec <text> [--task-title <text>] [--display-name <text>] [--deps <json_array>] [--parent <task_id>] [--run <run_id>] [--json]
+orca orchestration task-list [--status <status>] [--ready] [--brief] [--inbox] [--run <run_id>] [--json]
 orca orchestration task-update --id <task_id> --status <status> [--result <json>] [--json]
 orca orchestration dispatch --task <task_id> --to <handle> [--from <handle>] [--inject] [--json]
 orca orchestration dispatch-show --task <task_id> [--json]
@@ -183,8 +183,9 @@ Create the Run and every independent Task first, then start all independent work
 
 ```bash
 orca orchestration run-create --objective "<objective>" --json
-orca orchestration task-create --spec "<worker A task>" --json
-orca orchestration task-create --spec "<worker B task>" --json
+# Use the run.id returned by run-create for both supervised tasks.
+orca orchestration task-create --spec "<worker A task>" --run <run_id> --json
+orca orchestration task-create --spec "<worker B task>" --run <run_id> --json
 orca orchestration worker-start --task <task_a> --worktree current --agent codex --json
 orca orchestration worker-start --task <task_b> --worktree current --agent claude --json
 ```
@@ -203,7 +204,7 @@ Setup normally starts alongside the agent. Only a repository explicitly configur
 
 Read the returned receipt before continuing: `ready` plus setup `running` is normal for start-immediately, while wait-for-setup returns setup `succeeded` before accepting task input. A failed or unknown start exits nonzero; inspect its `stage`, `effects`, and `residualResources` instead of guessing or automatically retrying. A wait-for-setup timeout can honestly leave setup `running`, which is not proof of failure.
 
-To run the worker on another connected Orca server, add `--on <saved-environment>`. The Run and Tasks remain authoritative on the current server; later commands route by Dispatch ID, so never repeat `--on`:
+To run the worker on another connected Orca server, add `--on <saved-environment>`. The Run and assigned Tasks remain authoritative on the current server; later commands route by Dispatch ID, so never repeat `--on`:
 
 ```bash
 # Mac Run home -> Windows worker (the reverse is identical from a Windows Run home)
@@ -385,13 +386,13 @@ Wait for `tui-idle` before dispatching. Always pass `--timeout-ms`; real coding 
 ```bash
 orca terminal create --worktree active --title login-css-worker --command "claude" --json
 orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
-orca orchestration task-create --spec "Fix the login button CSS" --json
+orca orchestration task-create --spec "Fix the login button CSS" --run <run_id> --json
 orca orchestration dispatch --task <task_id> --to <handle> --inject --json
 orca orchestration check --wait --types worker_done,escalation,question --timeout-ms 900000 --json
 ```
 
 ## Next Action
 
-Coordinator: confirm `orca status --json`, create or bind a Run, inspect `task-list`/`dispatch-show` if inheriting state, then use the explicit supervised loop (`task-create` -> `worker-start` -> `check --wait`). Use low-level terminal creation plus `dispatch --inject` only when the composed start does not express the needed topology. After every accepted `worker_done`, either transfer the exact terminal to an immediate follow-up Dispatch or run `worker-release` before the next wait.
+Coordinator: confirm `orca status --json`, create or bind a Run, inspect `task-list`/`dispatch-show` if inheriting state, then use the explicit supervised loop (`task-create --run <run_id>` -> `worker-start` -> `check --wait`). Use low-level terminal creation plus `dispatch --inject` only when the composed start does not express the needed topology. After every accepted `worker_done`, either transfer the exact terminal to an immediate follow-up Dispatch or run `worker-release` before the next wait.
 
 Worker: if the current prompt contains a live dispatch preamble, do the task, use `ask` for blocking questions, and send `worker_done` once with the required payload. If the preamble is stale or absent, do not send lifecycle messages; inspect state or treat the prompt as an ordinary handoff.

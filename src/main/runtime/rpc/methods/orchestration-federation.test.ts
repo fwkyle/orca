@@ -367,7 +367,7 @@ describe('orchestration federation', () => {
 
     expect(homeDb.getTask(task.id)?.status).toBe('completed')
     expect(homeDb.getWorkerDispatch(dispatch.id)?.state).toBe('succeeded')
-    expect(homeDb.getRunMailboxHistory(task.run_id, 10)).toEqual(
+    expect(homeDb.getRunMailboxHistory(task.run_id!, 10)).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           id: expect.stringMatching(/^relay_/),
@@ -417,7 +417,7 @@ describe('orchestration federation', () => {
 
     await homeRuntime.syncOrchestrationFederation()
     const question = homeDb
-      .getRunMailboxHistory(task.run_id, 10)
+      .getRunMailboxHistory(task.run_id!, 10)
       .find((message) => message.type === 'question')
     expect(question).toMatchObject({
       body: 'Should I include slow integration tests?'
@@ -533,7 +533,7 @@ describe('orchestration federation', () => {
 
     expect(
       homeDb
-        .getRunMailboxHistory(task.run_id, 10)
+        .getRunMailboxHistory(task.run_id!, 10)
         .filter((message) => message.subject === 'Checkpoint')
     ).toHaveLength(1)
     expect(homeDb.getFederatedDispatch(dispatch.id)?.to_home_imported_sequence).toBe(1)
@@ -550,9 +550,9 @@ describe('orchestration federation', () => {
         sequence: 2,
         message: {
           id: 'relay_gap',
-          runId: task.run_id,
+          runId: task.run_id!,
           from: `dispatch:${dispatch.id}`,
-          to: `run:${task.run_id}`,
+          to: `run:${task.run_id!}`,
           subject: 'Gap',
           body: 'Out of order',
           type: 'status',
@@ -569,9 +569,9 @@ describe('orchestration federation', () => {
       sequence: 1,
       message: {
         id: 'relay_first',
-        runId: task.run_id,
+        runId: task.run_id!,
         from: `dispatch:${dispatch.id}`,
-        to: `run:${task.run_id}`,
+        to: `run:${task.run_id!}`,
         subject: 'First',
         body: 'Arrived after the gap was rejected',
         type: 'status',
@@ -584,9 +584,9 @@ describe('orchestration federation', () => {
       sequence: 2,
       message: {
         id: 'relay_gap',
-        runId: task.run_id,
+        runId: task.run_id!,
         from: `dispatch:${dispatch.id}`,
-        to: `run:${task.run_id}`,
+        to: `run:${task.run_id!}`,
         subject: 'Gap',
         body: 'Out of order',
         type: 'status',
@@ -599,9 +599,9 @@ describe('orchestration federation', () => {
       sequence: 2,
       message: {
         id: 'relay_gap',
-        runId: task.run_id,
+        runId: task.run_id!,
         from: `dispatch:${dispatch.id}`,
-        to: `run:${task.run_id}`,
+        to: `run:${task.run_id!}`,
         subject: 'Gap',
         body: 'Out of order',
         type: 'status',
@@ -615,7 +615,7 @@ describe('orchestration federation', () => {
     expect(homeDb.getFederatedDispatch(dispatch.id)?.to_home_imported_sequence).toBe(2)
     expect(
       homeDb
-        .getRunMailboxHistory(task.run_id, 10)
+        .getRunMailboxHistory(task.run_id!, 10)
         .filter((message) => ['relay_first', 'relay_gap'].includes(message.id))
     ).toHaveLength(2)
   })
@@ -652,7 +652,7 @@ describe('orchestration federation', () => {
     await vi.waitFor(() =>
       expect(
         homeDb
-          .getRunMailboxHistory(task.run_id, 10)
+          .getRunMailboxHistory(task.run_id!, 10)
           .some((message) => message.subject === 'After home restart')
       ).toBe(true)
     )

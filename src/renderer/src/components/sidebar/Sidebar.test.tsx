@@ -51,6 +51,10 @@ vi.mock('./WorktreeList', () => ({
   default: () => <div data-testid="worktree-list" />
 }))
 
+vi.mock('./OrchestrationTaskSection', () => ({
+  default: () => <div data-testid="orchestration-task-section" />
+}))
+
 vi.mock('./SidebarToolbar', () => ({
   default: () => <div data-testid="sidebar-toolbar" />
 }))

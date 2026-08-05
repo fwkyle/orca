@@ -313,7 +313,7 @@ describe('role roster store', () => {
       .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'role_roster'`)
       .get() as { name: string } | undefined
     expect(tableRow?.name).toBe('role_roster')
-    expect(sqlite.pragma('user_version', { simple: true })).toBe(24)
+    expect(sqlite.pragma('user_version', { simple: true })).toBe(26)
 
     const row = createRoster(d, { lastSeenHandle: 'term_A' })
     expect(d.refreshRoleRosterHandle(row.id, 'term_B')?.last_seen_handle).toBe('term_B')

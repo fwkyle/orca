@@ -124,6 +124,40 @@ describe('Coordinator', () => {
     await expect(coordinator.run()).rejects.toThrow('No tasks found')
   })
 
+  it('leaves inbox tasks untouched and never creates a dispatch context for them', async () => {
+    db = new OrchestrationDb(':memory:')
+    const runtime = createMockRuntime()
+    runtime.terminals = [{ handle: 'term_a', worktreeId: 'wt1', connected: true, writable: true }]
+
+    const assigned = db.createTask({ spec: 'run-scoped work' })
+    const inbox = db.createTask({ spec: 'capture for later', runId: null })
+    const inboxBefore = db.getTask(inbox.id)
+
+    expect(() => db.createDispatchContext(inbox.id, 'term_a')).toThrow('is not assigned to a Run')
+
+    const coordinator = new Coordinator(db, runtime, {
+      spec: 'dispatch assigned work',
+      coordinatorHandle: 'coord',
+      pollIntervalMs: 20
+    })
+    const runPromise = coordinator.run()
+
+    await new Promise((resolve) => setTimeout(resolve, 80))
+
+    expect(db.getDispatchContext(inbox.id)).toBeUndefined()
+    expect(db.getTask(assigned.id)?.status).toBe('dispatched')
+    expect(db.getTask(inbox.id)).toEqual(inboxBefore)
+    expect(runtime.sentMessages.map(({ text }) => text)).not.toContainEqual(
+      expect.stringContaining('capture for later')
+    )
+
+    insertWorkerDone(db, { taskId: assigned.id })
+    const result = await runPromise
+
+    expect(result.status).toBe('completed')
+    expect(db.getTask(inbox.id)).toEqual(inboxBefore)
+  })
+
   it('dispatches a ready task to an available terminal', async () => {
     db = new OrchestrationDb(':memory:')
     const runtime = createMockRuntime()

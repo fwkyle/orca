@@ -152,7 +152,7 @@ export class Coordinator {
       }
 
       // Why: an early stop leaves tasks incomplete, so the run counts as failed.
-      const tasks = this.db.listTasks()
+      const tasks = this.listAssignedTasks()
       const allDone = tasks.every((t) => t.status === 'completed' || t.status === 'failed')
       const failedTasks = [
         ...new Set([
@@ -185,7 +185,7 @@ export class Coordinator {
   // Why: decomposition isn't implemented yet — tasks must be pre-created before run(); AI-driven decomposition is a future phase.
   private async decompose(): Promise<void> {
     this.state.phase = 'decomposing'
-    const existing = this.db.listTasks()
+    const existing = this.listAssignedTasks()
     if (existing.length === 0) {
       throw new Error(
         'No tasks found. Create tasks with orchestration.taskCreate before running the coordinator.'
@@ -346,12 +346,12 @@ export class Coordinator {
 
   private async dispatchReadyTasks(): Promise<void> {
     this.state.phase = 'dispatching'
-    const readyTasks = this.db.listTasks({ ready: true })
+    const readyTasks = this.listAssignedTasks({ ready: true })
     if (readyTasks.length === 0) {
       return
     }
 
-    const dispatched = this.db.listTasks({ status: 'dispatched' })
+    const dispatched = this.listAssignedTasks({ status: 'dispatched' })
     let slotsAvailable = this.opts.maxConcurrent - dispatched.length
     if (slotsAvailable <= 0) {
       return
@@ -389,6 +389,11 @@ export class Coordinator {
   }
 
   private async dispatchTask(task: TaskRow, targetHandle: string): Promise<void> {
+    if (task.assignment_state !== 'assigned' || task.run_id === null) {
+      this.opts.onLog(`Skipping dispatch of ${task.id}: task is not assigned to a Run`)
+      return
+    }
+
     // Why (§3.1): drift check runs before createDispatchContext so a refusal doesn't bump failure_count (carried forward as MAX in db.ts:301-306) and burn the circuit-breaker budget; the task stays `ready` and retries next tick.
     const { allowStale, strippedSpec } = parseAllowStaleBaseFromSpec(task.spec)
     let baseDrift: {
@@ -469,7 +474,7 @@ export class Coordinator {
   private async getAvailableTerminals(): Promise<string[]> {
     try {
       const result = await this.runtime.listTerminals(this.opts.worktree)
-      const dispatched = this.db.listTasks({ status: 'dispatched' })
+      const dispatched = this.listAssignedTasks({ status: 'dispatched' })
       const busyHandles = new Set<string>()
 
       for (const task of dispatched) {
@@ -495,7 +500,7 @@ export class Coordinator {
   }
 
   private checkConvergence(): boolean {
-    const tasks = this.db.listTasks()
+    const tasks = this.listAssignedTasks()
     if (tasks.length === 0) {
       return true
     }
@@ -524,5 +529,14 @@ export class Coordinator {
     return new Promise((resolve) => {
       setTimeout(resolve, ms)
     })
+  }
+
+  // Why: inbox rows have no Run and must never enter coordinator dispatch or convergence decisions.
+  private listAssignedTasks(
+    filter: { status?: TaskRow['status']; ready?: boolean } = {}
+  ): TaskRow[] {
+    return this.db
+      .listTasks({ ...filter, assignmentState: 'assigned' })
+      .filter((task) => task.run_id !== null)
   }
 }

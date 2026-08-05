@@ -254,6 +254,21 @@ describe('resolveWorktreeStatus', () => {
     expect(status).toBe('working')
   })
 
+  it('keeps an inactive worktree spinner visible before the card is clicked', () => {
+    const status = resolveWorktreeStatus({
+      tabs: [{ id: 'tab-1', title: 'bash' }],
+      browserTabs: [],
+      // The PTY can be absent while the hook still has a fresh attributed task.
+      ptyIdsByTabId: { 'tab-1': [] },
+      hasPermission: false,
+      hasLiveWorking: true,
+      hasLiveDone: false,
+      hasRetainedDone: false
+    })
+
+    expect(status).toBe('working')
+  })
+
   it('lets heuristic working beat hasLiveDone (newer in-progress signal wins)', () => {
     const status = resolveWorktreeStatus({
       tabs: [{ id: 'tab-1', title: 'claude [working]' }],

@@ -91,6 +91,42 @@ describe('selectWorktreeAgentActivitySummary', () => {
     expect(nowSpy).toHaveBeenCalledTimes(1)
   })
 
+  it.each(['working', 'blocked', 'waiting'] as const)(
+    'keeps %s visible for an inactive attributed source task before click',
+    (state) => {
+      vi.spyOn(Date, 'now').mockReturnValue(2_000)
+      const paneKey = makePaneKey('tab-source', LEAF_ID)
+      const summary = selectWorktreeAgentActivitySummary(
+        {
+          tabsByWorktree: { 'repo::/inactive-source': [] },
+          agentStatusEpoch: 0,
+          agentStatusByPaneKey: {
+            [paneKey]: {
+              paneKey,
+              state,
+              prompt: 'source card task',
+              updatedAt: 1_500,
+              stateStartedAt: 1_000,
+              stateHistory: [],
+              worktreeId: 'repo::/inactive-source',
+              orchestration: {
+                taskId: 'task_78b7ce444fe6',
+                dispatchId: 'ctx_source_card'
+              }
+            }
+          },
+          migrationUnsupportedByPtyId: {},
+          runtimeAgentOrchestrationByPaneKey: {},
+          retainedAgentsByPaneKey: {}
+        },
+        'repo::/inactive-source'
+      )
+
+      expect(summary.hasLiveWorking).toBe(state === 'working')
+      expect(summary.hasPermission).toBe(state !== 'working')
+    }
+  )
+
   it('reuses the cached summary when same-state agent pings only clone the status map', () => {
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(2_000)
     const paneKey = makePaneKey('tab-1', LEAF_ID)
