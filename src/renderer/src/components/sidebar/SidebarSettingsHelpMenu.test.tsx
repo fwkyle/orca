@@ -222,14 +222,14 @@ describe('SidebarSettingsHelpMenu', () => {
     expect(html).not.toContain('Milestones')
   })
 
-  it('renders the Onboarding menu item by default', () => {
+  it('hides the Onboarding menu item by default', () => {
     const html = renderToStaticMarkup(<SidebarSettingsHelpMenu />)
-    expect(html).toContain('Onboarding')
+    expect(html).not.toContain('Onboarding')
   })
 
-  it('renders Restart Orca by default', () => {
+  it('hides Restart Orca by default', () => {
     const html = renderToStaticMarkup(<SidebarSettingsHelpMenu />)
-    expect(html).toContain('Restart Orca')
+    expect(html).not.toContain('Restart Orca')
   })
 
   it('renders Docs link', () => {
@@ -270,12 +270,12 @@ describe('SidebarSettingsHelpMenu', () => {
     expect(html).toContain('>X<')
   })
 
-  it('routes the update menu entry to Settings without invoking the updater bridge', async () => {
+  it('routes the manual update menu entry to Settings without invoking the updater bridge', async () => {
     const container = await renderMenu()
-    const checkButton = findMenuItem(container, 'Check for Updates')
+    const updateButton = findMenuItem(container, 'Manual App Updates')
 
     await act(async () => {
-      checkButton.click()
+      updateButton.click()
     })
 
     expect(mocks.openSettingsPage).toHaveBeenCalledOnce()

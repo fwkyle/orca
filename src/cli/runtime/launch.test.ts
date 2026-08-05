@@ -1,6 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { encodePairingOffer, PAIRING_OFFER_VERSION } from '../../shared/pairing'
@@ -68,6 +68,24 @@ const SSH_RECIPE_JSON = JSON.stringify({
 })
 const INVALID_SSH_RECIPE_JSON = SSH_RECIPE_JSON.replace('/workspace/repo', 'relative/repo')
 const IGNORED_NON_RECIPE_STDOUT = '[serve] ignored non-recipe stdout'
+const QA_CANDIDATE_ROOT = join(
+  homedir(),
+  'Library',
+  'Application Support',
+  'Orca Kyle QA',
+  'candidate'
+)
+
+async function useQaUserDataPath(prefix: string, temporaryDirectories: string[]): Promise<string> {
+  await mkdir(QA_CANDIDATE_ROOT, { recursive: true, mode: 0o700 })
+  const userDataPath = await mkdtemp(join(QA_CANDIDATE_ROOT, prefix))
+  temporaryDirectories.push(userDataPath)
+  process.env.ORCA_DEV_CLI_INVOCATION = '1'
+  process.env.ORCA_KYLE_QA = '1'
+  process.env.ORCA_KYLE_QA_USER_DATA_PATH = userDataPath
+  process.env.ORCA_USER_DATA_PATH = userDataPath
+  return userDataPath
+}
 
 function startRecipeJsonServer() {
   const child = new FakeChildProcess()
@@ -94,6 +112,9 @@ describe('serveOrcaApp', () => {
     delete process.env.ORCA_APP_EXECUTABLE
     delete process.env.ORCA_APP_EXECUTABLE_NEEDS_APP_ROOT
     delete process.env.ORCA_APPIMAGE_NO_SANDBOX
+    delete process.env.ORCA_DEV_CLI_INVOCATION
+    delete process.env.ORCA_KYLE_QA
+    delete process.env.ORCA_KYLE_QA_USER_DATA_PATH
     delete process.env.ORCA_USER_DATA_PATH
     return Promise.all(
       temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true }))
@@ -108,9 +129,8 @@ describe('serveOrcaApp', () => {
       const appPath = join(root, 'Orca.app')
       const executable = join(appPath, 'Contents', 'MacOS', 'Orca')
       const infoPlistPath = join(appPath, 'Contents', 'Info.plist')
-      const userDataPath = join(root, 'user-data')
+      const userDataPath = await useQaUserDataPath('orca-serve-update-', temporaryDirectories)
       await mkdir(join(appPath, 'Contents', 'MacOS'), { recursive: true })
-      await mkdir(userDataPath, { recursive: true })
       await writeFile(
         infoPlistPath,
         '<plist><dict><key>CFBundleShortVersionString</key><string>1.0.51</string></dict></plist>'
@@ -176,9 +196,11 @@ describe('serveOrcaApp', () => {
       temporaryDirectories.push(root)
       const appPath = join(root, 'Orca.app')
       const executable = join(appPath, 'Contents', 'MacOS', 'Orca')
-      const userDataPath = join(root, 'user-data')
+      const userDataPath = await useQaUserDataPath(
+        'orca-serve-update-mismatch-',
+        temporaryDirectories
+      )
       await mkdir(join(appPath, 'Contents', 'MacOS'), { recursive: true })
-      await mkdir(userDataPath, { recursive: true })
       await writeFile(
         join(appPath, 'Contents', 'Info.plist'),
         '<plist><dict><key>CFBundleShortVersionString</key><string>1.0.61</string></dict></plist>'
@@ -230,9 +252,11 @@ describe('serveOrcaApp', () => {
       temporaryDirectories.push(root)
       const appPath = join(root, 'Orca.app')
       const executable = join(appPath, 'Contents', 'MacOS', 'Orca')
-      const userDataPath = join(root, 'user-data')
+      const userDataPath = await useQaUserDataPath(
+        'orca-serve-update-spawn-failure-',
+        temporaryDirectories
+      )
       await mkdir(join(appPath, 'Contents', 'MacOS'), { recursive: true })
-      await mkdir(userDataPath, { recursive: true })
       await writeFile(
         join(appPath, 'Contents', 'Info.plist'),
         '<plist><dict><key>CFBundleShortVersionString</key><string>1.0.61</string></dict></plist>'
@@ -278,9 +302,11 @@ describe('serveOrcaApp', () => {
       temporaryDirectories.push(root)
       const appPath = join(root, 'Orca.app')
       const executable = join(appPath, 'Contents', 'MacOS', 'Orca')
-      const userDataPath = join(root, 'user-data')
+      const userDataPath = await useQaUserDataPath(
+        'orca-serve-update-no-readiness-',
+        temporaryDirectories
+      )
       await mkdir(join(appPath, 'Contents', 'MacOS'), { recursive: true })
-      await mkdir(userDataPath, { recursive: true })
       await writeFile(
         join(appPath, 'Contents', 'Info.plist'),
         '<plist><dict><key>CFBundleShortVersionString</key><string>1.0.61</string></dict></plist>'
