@@ -3,6 +3,15 @@ type ParsedVersion = {
   prerelease: string[]
 }
 
+export type LocalBuildMetadata = {
+  baseVersion: string
+  timestampMs: number
+  commit: string
+}
+
+const LOCAL_BUILD_VERSION =
+  /^(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:-|\.)local\.(\d+)\.([0-9A-Za-z-]+)$/
+
 function parseVersion(value: string): ParsedVersion | null {
   const normalized = value.trim().replace(/^v/i, '')
   const match = normalized.match(
@@ -30,6 +39,30 @@ export function isPrereleaseAppVersion(value: string): boolean {
 export function isPerfPrereleaseAppVersion(value: string): boolean {
   const parsed = parseVersion(value)
   return parsed?.prerelease.some((identifier) => identifier.toLowerCase() === 'perf') ?? false
+}
+
+/** Reads the timestamp and commit that local package builds append to app.getVersion(). */
+export function parseLocalBuildMetadata(value: string): LocalBuildMetadata | null {
+  const normalized = value.trim().replace(/^v/i, '')
+  const match = normalized.match(LOCAL_BUILD_VERSION)
+  if (!match || !isValidAppVersion(match[1])) {
+    return null
+  }
+
+  const timestampMs = Number(match[2])
+  if (
+    !Number.isSafeInteger(timestampMs) ||
+    timestampMs <= 0 ||
+    Number.isNaN(new Date(timestampMs).getTime())
+  ) {
+    return null
+  }
+
+  return {
+    baseVersion: match[1],
+    timestampMs,
+    commit: match[3]
+  }
 }
 
 function compareIdentifiers(left: string, right: string): number {
