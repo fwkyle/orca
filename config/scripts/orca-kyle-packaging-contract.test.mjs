@@ -10,7 +10,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
-import test from 'node:test'
+import { it } from 'vitest'
 
 const projectDir = path.resolve(import.meta.dirname, '../..')
 
@@ -18,7 +18,7 @@ function readProjectFile(relativePath) {
   return readFileSync(path.join(projectDir, relativePath), 'utf8')
 }
 
-test('uses fork-only package, builder, helper, and dev-link identities', () => {
+it('uses fork-only package, builder, helper, and dev-link identities', () => {
   const packageJson = JSON.parse(readProjectFile('package.json'))
   const builderConfig = readProjectFile('config/electron-builder.config.cjs')
   const computerBuild = readProjectFile('config/scripts/build-computer-macos.mjs')
@@ -49,7 +49,7 @@ test('uses fork-only package, builder, helper, and dev-link identities', () => {
   assert.match(linuxRemove, /link="\/usr\/bin\/orca-kyle"/)
 })
 
-test(
+it(
   'installs only the fork dev CLI link inside an explicit temporary root',
   {
     skip: process.platform === 'win32'
@@ -71,7 +71,7 @@ test(
   }
 )
 
-test(
+it(
   'rejects a malformed dev CLI link root before installing anything',
   {
     skip: process.platform === 'win32'
@@ -88,7 +88,7 @@ test(
   }
 )
 
-test(
+it(
   'fails when a foreign fork command would otherwise be reported as installed',
   {
     skip: process.platform === 'win32'

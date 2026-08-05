@@ -368,7 +368,7 @@ function formatParsedRruleSchedule(schedule: ReturnType<typeof parseAutomationRr
   if (schedule.preset === 'weekdays') {
     return `Weekdays at ${time}`
   }
-  const day = new Intl.DateTimeFormat(undefined, { weekday: 'long' }).format(
+  const day = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(
     new Date(2026, 0, 4 + schedule.dayOfWeek)
   )
   return `${day}s at ${time}`
@@ -406,7 +406,7 @@ function classifyParsedCronSchedule(rule: ParsedCron): AutomationCronScheduleCla
     }
     const dayOfWeek = getSingleSetValue(rule.daysOfWeek)
     if (dayOfWeek !== null) {
-      const day = new Intl.DateTimeFormat(undefined, { weekday: 'long' }).format(
+      const day = new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(
         new Date(2026, 0, 4 + dayOfWeek)
       )
       return {

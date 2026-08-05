@@ -16,8 +16,8 @@
 // `pnpm run build:cli`. The verification gate explicitly builds the CLI
 // before running this file.
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { OrcaRuntimeService } from './orca-runtime'
@@ -29,6 +29,32 @@ import { OrcaRuntimeRpcServer } from './runtime-rpc'
 // file itself lives.
 const CLI_PATH = join(process.cwd(), 'out', 'cli', 'index.js')
 
+function createQaUserDataPath(prefix: string): string {
+  const appDataPath =
+    process.platform === 'darwin'
+      ? join(homedir(), 'Library', 'Application Support')
+      : process.platform === 'win32'
+        ? (process.env.APPDATA ?? join(homedir(), 'AppData', 'Roaming'))
+        : (process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'))
+  const candidateRoot = join(appDataPath, 'Orca Kyle QA', 'candidate')
+  mkdirSync(candidateRoot, { recursive: true, mode: 0o700 })
+  return mkdtempSync(join(candidateRoot, prefix))
+}
+
+function childEnvironment(
+  userDataPath: string,
+  extraEnv: Record<string, string> = {}
+): NodeJS.ProcessEnv {
+  return {
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('ORCA_'))),
+    ORCA_KYLE_QA: '1',
+    ORCA_KYLE_QA_USER_DATA_PATH: userDataPath,
+    ORCA_DEV_CLI_INVOCATION: '1',
+    ORCA_TERMINAL_HANDLE: 'term_cli',
+    ...extraEnv
+  }
+}
+
 const describeIfBuilt = existsSync(CLI_PATH) ? describe : describe.skip
 
 async function runBuiltCli(
@@ -37,12 +63,7 @@ async function runBuiltCli(
   extraEnv: Record<string, string> = {}
 ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
   const child = spawn(process.execPath, [CLI_PATH, ...args], {
-    env: {
-      ...process.env,
-      ORCA_USER_DATA_PATH: userDataPath,
-      ORCA_TERMINAL_HANDLE: 'term_cli',
-      ...extraEnv
-    },
+    env: childEnvironment(userDataPath, extraEnv),
     stdio: ['ignore', 'pipe', 'pipe']
   })
 
@@ -67,7 +88,7 @@ async function runBuiltCli(
 
 describeIfBuilt('orca orchestration check --wait subprocess (§3.4)', () => {
   it('emits newline-flushed JSON keepalives to stderr while waiting', async () => {
-    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-cli-sub-'))
+    const userDataPath = createQaUserDataPath('orca-cli-sub-')
     const runtime = new OrcaRuntimeService()
     const db = new OrchestrationDb(':memory:')
     runtime.setOrchestrationDb(db)
@@ -95,12 +116,10 @@ describeIfBuilt('orca orchestration check --wait subprocess (§3.4)', () => {
           '--json'
         ],
         {
-          env: {
-            ...process.env,
-            ORCA_USER_DATA_PATH: userDataPath,
+          env: childEnvironment(userDataPath, {
             ORCA_TERMINAL_HANDLE: 'term_nobody',
             ORCA_KEEPALIVE_INTERVAL_MS: String(keepaliveMs)
-          },
+          }),
           // Why: explicit pipe for all three fds so we can watch stderr
           // in real time; no TTY attached (Bash-tool parity).
           stdio: ['ignore', 'pipe', 'pipe']
@@ -188,13 +207,46 @@ describeIfBuilt('orca orchestration check --wait subprocess (§3.4)', () => {
     } finally {
       db.close()
       await server.stop()
+      // Why: mirror the reset test's teardown order — close the DB and stop
+      // the RPC server before removing the QA userDataPath, so no live handle
+      // holds the directory on Windows and the path is always cleaned up.
+      rmSync(userDataPath, { recursive: true, force: true })
     }
+
+    // Why: success-path proof — once the keepalive check completes without
+    // throwing, its QA userDataPath must be gone (no residue left behind).
+    expect(existsSync(userDataPath)).toBe(false)
   }, 30_000)
+
+  it('removes its QA userDataPath even when the body throws', async () => {
+    const userDataPath = createQaUserDataPath('orca-cli-sub-')
+    const runtime = new OrcaRuntimeService()
+    const db = new OrchestrationDb(':memory:')
+    runtime.setOrchestrationDb(db)
+    const server = new OrcaRuntimeRpcServer({ runtime, userDataPath })
+    await server.start()
+
+    let threw = false
+    try {
+      // Why: force the error path so the finally cleanup is proven for a
+      // failing run, not only for the happy-path keepalive test above.
+      throw new Error('simulated subprocess assertion failure')
+    } catch {
+      threw = true
+    } finally {
+      db.close()
+      await server.stop()
+      rmSync(userDataPath, { recursive: true, force: true })
+    }
+
+    expect(threw).toBe(true)
+    expect(existsSync(userDataPath)).toBe(false)
+  })
 })
 
 describeIfBuilt('orca orchestration reset subprocess', () => {
   it('validates reset scopes against an isolated runtime through the built CLI', async () => {
-    const userDataPath = mkdtempSync(join(tmpdir(), 'orca-cli-reset-'))
+    const userDataPath = createQaUserDataPath('orca-cli-reset-')
     const runtime = new OrcaRuntimeService()
     const db = new OrchestrationDb(':memory:')
     runtime.setOrchestrationDb(db)

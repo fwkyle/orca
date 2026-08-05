@@ -55,6 +55,11 @@ vi.mock('electron', () => ({
   net: { fetch: vi.fn() }
 }))
 
+// Why: recovery actions exercise the automatic updater path regardless of the host's update preference.
+vi.mock('../shared/update-policy', () => ({
+  APP_UPDATE_POLICY: { policy: 'manual-local-only', automatic: true, externalNetwork: false }
+}))
+
 vi.mock('electron-updater', () => ({ autoUpdater: autoUpdaterMock }))
 vi.mock('./electron-updater-loader', () => ({ loadElectronAutoUpdater: () => autoUpdaterMock }))
 vi.mock('@electron-toolkit/utils', () => ({ is: { dev: false } }))

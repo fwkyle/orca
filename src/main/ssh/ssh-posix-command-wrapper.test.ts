@@ -87,7 +87,10 @@ describe('wrapRemoteCommandForPosixShell', () => {
 })
 
 function runThroughShell(shell: string, command: string, input?: string) {
-  return spawnSync(shell, ['-c', wrapRemoteCommandForPosixShell(command)], {
+  const shellName = shell.split('/').at(-1)
+  // Why: csh/tcsh read the user's startup file even for -c, so parser tests must ignore host rc state.
+  const args = shellName === 'csh' || shellName === 'tcsh' ? ['-fc'] : ['-c']
+  return spawnSync(shell, [...args, wrapRemoteCommandForPosixShell(command)], {
     encoding: 'utf8',
     input
   })
