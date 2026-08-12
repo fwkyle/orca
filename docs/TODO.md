@@ -352,3 +352,18 @@ ps -Ao pid,command  (전체 2020개)        114~149ms       <- 2개 조회보다
 - `task-create`에서 `--run`이 없으면 **실패 닫힘**으로 거절하거나, 최소한 경고와 함께 어느 Run에 들어갔는지 출력한다. 지금은 조용히 성공한다.
 - 발령(`dispatch`)은 **대상 카드가 발령자의 Run에 속하는지 확인**한 뒤에만 진행한다. 지금은 Run 밖 카드도 발령된다.
 - 판 마감 점검에 **"이 판 워크트리에서 도는 작업자 중 장부에 없는 것"** 조회를 넣는다. 고아를 사후에 찾을 수단이 현재 없다.
+
+## 미배정(inbox) 카드 기능 정비 — 인계가 obsolete contract로 거부됨 (2026-08-12 kyle 실측)
+
+**Why**: improvement-1 Track B가 만든 미배정 카드 대기실이 반쯤 고립됐다 — 카드를 넣을 수는 있는데
+빼낼 방법이 전부 막혀 있다. 잔재 카드가 영구히 남는다.
+
+실측 증상 3종 (2026-08-12):
+- [ ] UI "run으로 보내기(인계)"가 `This orchestration mutation uses an obsolete contract. No effects
+      were applied.`로 거부 — 인계 mutation의 contract_version이 현행 런타임과 어긋남. 갱신 필요.
+- [ ] UI에 삭제/보관 처리 옵션이 없음 — 고아 카드(닫힌 판 잔재 task_41c6e23b53a3 등) 처분 불가.
+- [ ] CLI(task-update)가 run_id NULL 카드에 못 닿음 — 바인딩 Run 범위만 조회. `--inbox` 같은
+      스코프 지원 필요.
+
+참고: 판 관제 대시보드 메모함 탭이 이 inbox를 읽기 전용 표면으로 보여주며 고아를 라벨링한다
+(kyle-agent-skills board-dashboard.py /api/inbox-cards).
